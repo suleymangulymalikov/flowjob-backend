@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from dotenv import dotenv_values
 from sqlalchemy import make_url
 from sqlalchemy.orm import Session
@@ -44,9 +46,16 @@ def test_database_url() -> str:
     return url
 
 
+def alembic_config(url: str) -> Config:
+    config = Config(str(ROOT / "alembic.ini"))
+    config.attributes["database_url"] = url
+    return config
+
+
 @pytest.fixture(scope="session")
 def test_engine(test_database_url):
-    """Engine for the test database."""
+    """Engine for the test database, migrated to the latest revision."""
+    command.upgrade(alembic_config(test_database_url), "head")
     engine = build_engine(test_database_url)
     yield engine
     engine.dispose()
