@@ -1,5 +1,11 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
 .pytest_cache/
+
+# Environment / secrets (never commit real credentials)
 .env
+.env.*
+!.env.example
