@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: {{ margin }}in; }
+  body {
+    font-family: "Times New Roman", Times, "Liberation Serif", serif;
+    font-size: {{ font_size }}pt;
+    line-height: 1.2;
+    margin: 0;
+  }
+  h1 { font-size: 1.6em; text-align: center; margin: 0; }
+  .contact { text-align: center; margin: 0.2em 0 0.4em; }
+  .nowrap { white-space: nowrap; }
+  h2 {
+    font-size: 1em;
+    text-transform: uppercase;
+    border-bottom: 0.75pt solid #000;
+    margin: 0.7em 0 0.3em;
+  }
+  .entry { margin-bottom: 0.45em; break-inside: avoid; }
+  .row { display: flex; justify-content: space-between; }
+  .org { font-weight: bold; }
+  .role { font-style: italic; }
+  ul { margin: 0.1em 0 0; padding-left: 1.3em; }
+  li { margin: 0; }
+  p { margin: 0; }
+</style>
+</head>
+<body>
+  <h1>{{ name }}</h1>
+  <div class="contact">
+    {%- for item in contact %}<span class="nowrap">{{ item }}</span>{% if not loop.last %} • {% endif %}{% endfor -%}
+  </div>
+
+  {% if summary %}
+  <h2>Summary</h2>
+  <p>{{ summary }}</p>
+  {% endif %}
+
+  {% if education %}
+  <h2>Education</h2>
+  {% for e in education %}
+  <div class="entry">
+    <div class="row"><span class="org">{{ e.institution }}</span></div>
+    <div class="row">
+      <span class="role">{{ e.degree }}{% if e.field_of_study %}, {{ e.field_of_study }}{% endif %}</span>
+      <span>{{ e.dates }}</span>
+    </div>
+    {% if e.grade or e.description %}
+    <ul>
+      {% if e.grade %}<li>Grade: {{ e.grade }}</li>{% endif %}
+      {% if e.description %}<li>{{ e.description }}</li>{% endif %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if experience %}
+  <h2>Experience</h2>
+  {% for e in experience %}
+  <div class="entry">
+    <div class="row"><span class="org">{{ e.company }}</span><span>{{ e.location or "" }}</span></div>
+    <div class="row"><span class="role">{{ e.position }}</span><span>{{ e.dates }}</span></div>
+    {% if e.bullets %}
+    <ul>{% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}</ul>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if projects %}
+  <h2>Projects</h2>
+  {% for p in projects %}
+  <div class="entry">
+    <div class="row">
+      <span class="org">{{ p.name }}</span>
+      <span>{{ p.url or "" }}</span>
+    </div>
+    {% if p.technologies %}<div class="role">{{ p.technologies | join(", ") }}</div>{% endif %}
+    {% if p.description %}<ul><li>{{ p.description }}</li></ul>{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if skills_lines %}
+  <h2>Skills &amp; Interests</h2>
+  {% for label, value in skills_lines %}
+  <p><strong>{{ label }}:</strong> {{ value }}</p>
+  {% endfor %}
+  {% endif %}
+</body>
+</html>

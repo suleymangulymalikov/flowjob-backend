@@ -6,9 +6,10 @@ FastAPI backend for FlowJob, using MongoDB (via [Beanie](https://beanie-odm.dev/
 
 Requires [uv](https://docs.astral.sh/uv/) and a MongoDB database (e.g. a free [MongoDB Atlas](https://cloud.mongodb.com) cluster).
 
-1. Install dependencies:
+1. Install dependencies. PDF generation ([WeasyPrint](https://weasyprint.org/)) also needs Pango installed on the system:
 
    ```bash
+   brew install pango       # macOS; on Debian/Ubuntu: apt install libpango-1.0-0 libpangoft2-1.0-0
    uv sync
    ```
 
