@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.auth.models import RefreshToken
 from app.main import app
+from app.profiles.models import Profile
 from app.users.models import User
 
 
@@ -23,5 +24,6 @@ def clean_db(client):
     async def clear():
         await User.delete_all()
         await RefreshToken.delete_all()
+        await Profile.delete_all()
 
     client.portal.call(clear)
