@@ -1,5 +1,7 @@
+import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from weasyprint import HTML
@@ -14,6 +16,10 @@ env = Environment(
 # Tried in order until the CV fits on one page: (font size in pt, page margin in inches).
 FIT_STEPS = [(11, 0.75), (10.5, 0.6), (10, 0.5), (9.5, 0.5), (9, 0.4)]
 
+# Structured native dates are strictly "YYYY-MM"; the browser CV builder also allows
+# free-form text (e.g. "Summer 2019"), which must be shown verbatim rather than dropped.
+_YEAR_MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
 
 def format_month(value: str) -> str:
     return datetime.strptime(value, "%Y-%m").strftime("%b %Y")
@@ -21,6 +27,26 @@ def format_month(value: str) -> str:
 
 def format_dates(start: str, end: str | None) -> str:
     return f"{format_month(start)} – {format_month(end) if end else 'Present'}"
+
+
+def _loose_month(value: Any) -> str | None:
+    """Format a "YYYY-MM" string as "Mon YYYY"; pass any other non-empty text through as-is."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return format_month(text) if _YEAR_MONTH.fullmatch(text) else text
+
+
+def format_dates_loose(start: Any, end: Any) -> str:
+    """Date range that tolerates free-form values and missing parts (never raises)."""
+    s, e = _loose_month(start), _loose_month(end)
+    if not s and not e:
+        return ""
+    if s and not e:
+        return f"{s} – Present"
+    if e and not s:
+        return e
+    return f"{s} – {e}"
 
 
 def build_context(name: str, email: str, profile: ProfileData) -> dict:
@@ -48,16 +74,83 @@ def build_context(name: str, email: str, profile: ProfileData) -> dict:
     }
 
 
-def render_cv_pdf(name: str, email: str, profile: ProfileData) -> bytes:
-    """Render a Harvard-style CV, shrinking font and margins until it fits on one page.
+def build_cv_context(name: str, email: str, content: dict[str, Any]) -> dict:
+    """Build the Harvard template context from a saved CV's browser content.
+
+    Maps the frontend CV shape (title/school/tech/free-form dates, free-form languages)
+    onto the same template the native profile uses, without discarding any entered data.
+    """
+    c = content or {}
+    contact = [v for v in (c.get("location"), c.get("phone"), email or c.get("email")) if v]
+    contact += [link for link in (c.get("links") or []) if link]
+
+    experience = [
+        {
+            "company": e.get("company") or "",
+            "position": e.get("title") or "",
+            "location": e.get("location") or "",
+            "bullets": [b for b in (e.get("bullets") or []) if b],
+            "dates": format_dates_loose(e.get("start"), e.get("end")),
+        }
+        for e in (c.get("experience") or [])
+    ]
+    education = [
+        {
+            "institution": e.get("school") or "",
+            "degree": e.get("degree") or "",
+            "field_of_study": None,
+            "grade": None,
+            "description": e.get("note") or None,
+            "dates": format_dates_loose(e.get("start"), e.get("end")),
+        }
+        for e in (c.get("education") or [])
+    ]
+    projects = [
+        {
+            "name": p.get("name") or "",
+            "url": None,
+            "technologies": [t.strip() for t in str(p.get("tech") or "").split(",") if t.strip()],
+            "description": p.get("description") or None,
+        }
+        for p in (c.get("projects") or [])
+    ]
+
+    skills_lines = []
+    if c.get("skills"):
+        skills_lines.append(("Technical", ", ".join(c["skills"])))
+    if c.get("languages"):  # free-form text, preserved verbatim
+        skills_lines.append(("Languages", str(c["languages"])))
+
+    return {
+        "name": name or c.get("fullName") or "",
+        "contact": contact,
+        "summary": c.get("summary") or "",
+        "education": education,
+        "experience": experience,
+        "projects": projects,
+        "skills_lines": skills_lines,
+    }
+
+
+def _render_context_to_pdf(context: dict) -> bytes:
+    """Render the Harvard template, shrinking font and margins until it fits on one page.
 
     If it still doesn't fit at the smallest step, the multi-page result is returned.
     """
     template = env.get_template("harvard.html")
-    context = build_context(name, email, profile)
     for font_size, margin in FIT_STEPS:
         html = template.render(**context, font_size=font_size, margin=margin)
         document = HTML(string=html).render()
         if len(document.pages) == 1:
             break
     return document.write_pdf()
+
+
+def render_cv_pdf(name: str, email: str, profile: ProfileData) -> bytes:
+    """Render a Harvard-style CV from the native profile model."""
+    return _render_context_to_pdf(build_context(name, email, profile))
+
+
+def render_saved_cv_pdf(name: str, email: str, content: dict[str, Any]) -> bytes:
+    """Render a Harvard-style CV from a saved CV's browser content."""
+    return _render_context_to_pdf(build_cv_context(name, email, content))

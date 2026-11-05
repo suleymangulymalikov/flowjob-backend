@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.auth.models import RefreshToken
+from app.integration.models import SavedCv
 from app.main import app
 from app.profiles.models import Profile
 from app.users.models import User
@@ -25,5 +26,6 @@ def clean_db(client):
         await User.delete_all()
         await RefreshToken.delete_all()
         await Profile.delete_all()
+        await SavedCv.delete_all()
 
     client.portal.call(clear)

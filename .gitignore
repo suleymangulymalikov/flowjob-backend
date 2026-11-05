@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 .env
 CLAUDE.md
+.DS_Store

@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     mongodb_uri: str
     mongodb_db_name: str = "flowjob"
 
+    cookie_secure: bool = False  # Set true behind HTTPS in production
+
     jwt_secret: str
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
