@@ -7,7 +7,11 @@ os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-bytes-long")
 import pytest
 from fastapi.testclient import TestClient
 
+from app.applications.models import Application
+from app.matches.models import MatchRecord, MatchUsage
+from app.tailor.models import TailorDraft
 from app.auth.models import RefreshToken
+from app.integration.models import SavedCv
 from app.main import app
 from app.profiles.models import Profile
 from app.users.models import User
@@ -25,5 +29,10 @@ def clean_db(client):
         await User.delete_all()
         await RefreshToken.delete_all()
         await Profile.delete_all()
+        await SavedCv.delete_all()
+        await Application.delete_all()
+        await MatchRecord.delete_all()
+        await MatchUsage.delete_all()
+        await TailorDraft.delete_all()
 
     client.portal.call(clear)

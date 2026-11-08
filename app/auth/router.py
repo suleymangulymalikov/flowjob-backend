@@ -84,6 +84,8 @@ async def refresh(data: RefreshRequest) -> Token:
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(data: RefreshRequest) -> None:
-    await RefreshToken.find_one(
+    stored = await RefreshToken.find_one(
         RefreshToken.token_hash == hash_refresh_token(data.refresh_token)
-    ).delete()
+    )
+    if stored is not None:
+        await stored.delete()

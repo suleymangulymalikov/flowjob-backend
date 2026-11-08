@@ -4,3 +4,12 @@ __pycache__/
 .pytest_cache/
 .env
 CLAUDE.md
+
+# Private configuration and local preservation artifacts
+.env
+.env.*
+!.env.example
+.handoff/
+.DS_Store
+*.pem
+*.key
