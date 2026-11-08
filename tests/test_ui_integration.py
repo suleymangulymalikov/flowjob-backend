@@ -54,6 +54,6 @@ def test_cv_crud_and_user_isolation(client):
 
 def test_missing_features_are_not_mocked(client):
     headers = signup(client)
-    assert client.get(f'{BASE}/matches', headers=headers).status_code == 404
-    assert client.get(f'{BASE}/applications', headers=headers).status_code == 404
+    # Gmail sync and AI CV tailoring remain unimplemented (applications and job matching are real).
     assert client.get(f'{BASE}/gmail', headers=headers).status_code == 404
+    assert client.post(f'{BASE}/tailor', headers=headers, json={'matchId': 'x'}).status_code == 404

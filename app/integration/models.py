@@ -11,6 +11,7 @@ class SavedCv(Document):
     job_title: str | None = None
     company: str | None = None
     match_id: str | None = None
+    source_cv_id: str | None = None  # the original CV a tailored version was derived from
     content: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

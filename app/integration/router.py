@@ -187,6 +187,7 @@ def present_cv(cv: SavedCv) -> dict[str, Any]:
     if cv.job_title: data['jobTitle'] = cv.job_title
     if cv.company: data['company'] = cv.company
     if cv.match_id: data['matchId'] = cv.match_id
+    if cv.source_cv_id: data['sourceCvId'] = cv.source_cv_id
     return data
 
 
@@ -196,6 +197,7 @@ class CVInput(BaseModel):
     jobTitle: str | None = None
     company: str | None = None
     matchId: str | None = None
+    sourceCvId: str | None = None
     content: dict[str, Any] | None = None
 
 
@@ -219,7 +221,8 @@ async def cvs(user: CurrentUser):
 async def create_cv(data: CVInput, user: CurrentUser):
     content = data.content or (await read_profile(user))
     cv = SavedCv(user_id=user.id, name=data.name or 'Original CV', kind=data.kind or 'original',
-                 job_title=data.jobTitle, company=data.company, match_id=data.matchId, content=content)
+                 job_title=data.jobTitle, company=data.company, match_id=data.matchId,
+                 source_cv_id=data.sourceCvId, content=content)
     await cv.insert()
     return present_cv(cv)
 
