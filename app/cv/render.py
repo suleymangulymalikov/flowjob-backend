@@ -2,8 +2,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup, escape
 from weasyprint import HTML
 
 from app.profiles.schemas import ProfileData
@@ -19,6 +21,46 @@ FIT_STEPS = [(11, 0.75), (10.5, 0.6), (10, 0.5), (9.5, 0.5), (9, 0.4)]
 # Structured native dates are strictly "YYYY-MM"; the browser CV builder also allows
 # free-form text (e.g. "Summer 2019"), which must be shown verbatim rather than dropped.
 _YEAR_MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+# Contact links: LinkedIn / GitHub URLs are shown as short clickable labels instead of raw URLs.
+_LABELLED_HOSTS = {"linkedin.com": "LinkedIn", "github.com": "GitHub"}
+_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:(?!\d)")
+
+
+def _safe_url(value: str) -> tuple[str, str] | None:
+    """(host, https URL) for a plain web link, adding a missing https://; None for anything unsafe."""
+    text = (value or "").strip()
+    if not text or re.search(r"\s", text):
+        return None
+    if _SCHEME.match(text):
+        if not re.match(r"^https?://", text, re.I):
+            return None  # javascript:, data:, mailto:, ftp: ... are never linked
+        text = re.sub(r"^http://", "https://", text, flags=re.I)
+    else:
+        text = f"https://{text}"
+    try:
+        parts = urlsplit(text)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if "." not in host or parts.username or parts.password:
+        return None
+    return host.removeprefix("www."), text
+
+
+def contact_item(value: str) -> str | Markup:
+    """A LinkedIn/GitHub link becomes a labelled link (inheriting the template's plain styling).
+
+    Any other value is returned unchanged so unrelated legacy entries are never altered or dropped.
+    """
+    safe = _safe_url(value)
+    if safe:
+        host, url = safe
+        for domain, label in _LABELLED_HOSTS.items():
+            if host == domain or host.endswith("." + domain):
+                return Markup('<a href="{}" style="color:inherit;text-decoration:none">{}</a>').format(url, label)
+    return value
 
 
 def format_month(value: str) -> str:
@@ -65,7 +107,14 @@ def build_context(name: str, email: str, profile: ProfileData) -> dict:
 
     return {
         "name": name,
-        "contact": [v for v in (p.location, p.phone, email, p.linkedin, p.github, p.website) if v],
+        "contact": [
+            v if k in ("location", "phone", "email") else contact_item(v)
+            for k, v in (
+                ("location", p.location), ("phone", p.phone), ("email", email),
+                ("linkedin", p.linkedin), ("github", p.github), ("website", p.website),
+            )
+            if v
+        ],
         "summary": p.summary,
         "education": [{**e.model_dump(), "dates": format_dates(e.start, e.end)} for e in profile.education],
         "experience": [{**e.model_dump(), "dates": format_dates(e.start, e.end)} for e in profile.experience],
@@ -82,7 +131,7 @@ def build_cv_context(name: str, email: str, content: dict[str, Any]) -> dict:
     """
     c = content or {}
     contact = [v for v in (c.get("location"), c.get("phone"), email or c.get("email")) if v]
-    contact += [link for link in (c.get("links") or []) if link]
+    contact += [contact_item(str(link)) for link in (c.get("links") or []) if link]
 
     experience = [
         {
