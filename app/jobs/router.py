@@ -1,14 +1,22 @@
-"""Open jobs in Poland from tracked companies, under /api/v1/jobs (login required)."""
+"""Open jobs in Poland from tracked companies, under /api/v1/jobs (login required).
+
+With `cvId`, every job also gets a keyword skill "fit" against that CV (see skills.py).
+That score uses no AI: the AI match only runs when the user asks for it on Job Match.
+"""
 import re
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from app.auth.dependencies import get_current_user
+from app.integration.models import SavedCv
 from app.jobs import service
 from app.jobs.models import JobPosting
+from app.jobs.skills import cv_skills, fit
 from app.users.models import User
 
 router = APIRouter(prefix='/api/v1', tags=['jobs'])
@@ -23,7 +31,21 @@ VENDOR_NAMES = {'greenhouse': 'Greenhouse', 'lever': 'Lever', 'ashby': 'Ashby', 
                 'recruitee': 'Recruitee', 'workable': 'Workable'}
 
 
-def present(p: JobPosting) -> dict[str, Any]:
+class JobListView(BaseModel):
+    """What the list needs from MongoDB: everything except the (large) description."""
+    id: PydanticObjectId = Field(alias='_id')
+    title: str
+    company: str
+    city: str
+    location: str
+    level: str
+    url: str | None = None
+    vendor: str
+    posted_at: datetime | None = None
+    skills: dict[str, Any] | None = None
+
+
+def present(p: JobPosting | JobListView) -> dict[str, Any]:
     return {
         'id': str(p.id),
         'title': p.title,
@@ -44,6 +66,23 @@ async def _counts(match: dict, field: str) -> list[dict]:
     return [{'name': r['_id'], 'count': r['count']} async for r in rows]
 
 
+async def _owned_cv(cv_id: str, user: User) -> SavedCv:
+    try:
+        cv = await SavedCv.find_one(SavedCv.id == PydanticObjectId(cv_id), SavedCv.user_id == user.id)
+    except (InvalidId, ValueError, TypeError):
+        cv = None
+    if not cv:
+        raise HTTPException(404, 'CV not found')
+    return cv
+
+
+def _fit_sort_key(item: tuple[JobListView, dict]) -> tuple:
+    posting, f = item
+    posted = service.as_utc(posting.posted_at)
+    # Scored jobs first (highest score), then unscored; newest first within the same score.
+    return (f['score'] is None, -(f['score'] or 0), -(posted.timestamp() if posted else 0), posting.title)
+
+
 @router.get('/jobs')
 async def list_jobs(
     user: CurrentUser,
@@ -51,9 +90,14 @@ async def list_jobs(
     city: Annotated[str | None, Query(max_length=60)] = None,
     company: Annotated[str | None, Query(max_length=120)] = None,
     q: Annotated[str | None, Query(max_length=100)] = None,
+    cv_id: Annotated[str | None, Query(alias='cvId', max_length=40)] = None,
+    sort: Literal['recent', 'fit'] = 'recent',
     page: Annotated[int, Query(ge=1, le=500)] = 1,
     page_size: Annotated[int, Query(alias='pageSize', ge=1, le=50)] = 20,
 ) -> dict[str, Any]:
+    if sort == 'fit' and not cv_id:
+        raise HTTPException(422, 'Choose a CV to sort by fit')
+    cv = cv_skills((await _owned_cv(cv_id, user)).content) if cv_id else None
     refreshing = await service.ensure_fresh()
 
     base: dict[str, Any] = {'level': {'$in': LEVELS[level]}}
@@ -66,12 +110,21 @@ async def list_jobs(
     if company:
         match['company'] = company
 
+    query = JobPosting.find(match).project(JobListView)
     total = await JobPosting.find(match).count()
-    items = await (JobPosting.find(match).sort([('posted_at', -1), ('title', 1)])
-                   .skip((page - 1) * page_size).limit(page_size).to_list())
+    start = (page - 1) * page_size
+    if sort == 'fit':
+        # Scores depend on the CV, so rank every matching job here (a few hundred at most), then page.
+        everything = await query.to_list()
+        ranked = sorted(((p, fit(p.skills, cv)) for p in everything), key=_fit_sort_key)
+        rows = ranked[start:start + page_size]
+    else:
+        page_items = await query.sort([('posted_at', -1), ('title', 1)]).skip(start).limit(page_size).to_list()
+        rows = [(p, fit(p.skills, cv) if cv else None) for p in page_items]
+
     refreshed_at = await service.last_refreshed_at()
     return {
-        'items': [present(p) for p in items],
+        'items': [{**present(p), **({'fit': f} if f is not None else {})} for p, f in rows],
         'total': total,
         'page': page,
         'pageSize': page_size,

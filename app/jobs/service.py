@@ -18,10 +18,12 @@ from beanie.operators import In, NotIn
 from app.config import settings
 from app.jobs.fetchers import FETCHERS, FetchError, fetch_description
 from app.jobs.models import JobPosting, JobSource
+from app.jobs.skills import SKILLS_VERSION, job_skills
 
 log = logging.getLogger(__name__)
 COMPANIES_FILE = Path(__file__).parent / 'companies.json'
 CONCURRENCY = 4
+DETAIL_CONCURRENCY = 4
 
 _lock = asyncio.Lock()
 _task: asyncio.Task | None = None
@@ -42,7 +44,16 @@ def as_utc(d: datetime | None) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=UTC)
 
 
-async def refresh_company(client: httpx.AsyncClient, company: dict, fetchers=FETCHERS) -> int:
+async def _with_skills(jobs: list[dict]) -> list[dict]:
+    """Add keyword skills to each job. Runs in a worker thread: ~20 ms per job of CPU work
+    must not block the web server while users are browsing."""
+    def compute():
+        return [{**j, 'skills': job_skills(j['title'], j['description'])} for j in jobs]
+    return await asyncio.to_thread(compute)
+
+
+async def refresh_company(client: httpx.AsyncClient, company: dict, fetchers=FETCHERS,
+                          describe=fetch_description, detail_semaphore: asyncio.Semaphore | None = None) -> int:
     """Fetch one company and sync its postings. Returns the number of Polish jobs found."""
     key = source_key(company)
     source = await JobSource.find_one(JobSource.key == key) or JobSource(
@@ -58,15 +69,30 @@ async def refresh_company(client: httpx.AsyncClient, company: dict, fetchers=FET
         return 0
 
     fresh = {f"{key}:{j['external_id']}": j for j in jobs}  # also removes duplicates
-    for posting_key, job in fresh.items():
-        existing = await JobPosting.find_one(JobPosting.key == posting_key)
-        if existing:
-            description = job['description'] if job['description'] is not None else existing.description
+    existing = {p.key: p for p in await JobPosting.find(In(JobPosting.key, list(fresh))).to_list()}
+
+    # Keep descriptions loaded earlier; load missing ones (SmartRecruiters) once, so every job can be scored.
+    detail_semaphore = detail_semaphore or asyncio.Semaphore(DETAIL_CONCURRENCY)
+
+    async def complete(posting_key: str, job: dict) -> dict:
+        if job['description'] is None and posting_key in existing:
+            job = {**job, 'description': existing[posting_key].description}
+        if job['description'] is None and settings.jobs_live_fetch:
+            async with detail_semaphore:
+                try:
+                    job = {**job, 'description': await describe(client, job['vendor'], job['slug'], job['external_id'])}
+                except FetchError as e:
+                    log.warning('Description for %s failed: %s', posting_key, e)
+        return job
+
+    completed = await asyncio.gather(*(complete(k, j) for k, j in fresh.items()))
+    for posting_key, job in zip(fresh, await _with_skills(list(completed))):
+        posting = existing.get(posting_key)
+        if posting:
             for field, value in job.items():
-                setattr(existing, field, value)
-            existing.description = description  # keep a description loaded earlier on demand
-            existing.last_seen_at = now
-            await existing.save()
+                setattr(posting, field, value)
+            posting.last_seen_at = now
+            await posting.save()
         else:
             await JobPosting(key=posting_key, first_seen_at=now, last_seen_at=now, **job).insert()
     # Jobs the company no longer lists are closed: remove them.
@@ -90,10 +116,11 @@ async def refresh_all(companies: list[dict] | None = None, fetchers=FETCHERS) ->
             await s.delete()
 
         semaphore = asyncio.Semaphore(CONCURRENCY)
+        detail_semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)  # shared: at most 4 description requests at once
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             async def one(company):
                 async with semaphore:
-                    return await refresh_company(client, company, fetchers)
+                    return await refresh_company(client, company, fetchers, detail_semaphore=detail_semaphore)
             counts = await asyncio.gather(*(one(c) for c in companies))
     summary = {'companies': len(companies), 'jobs': sum(counts)}
     log.info('Job refresh finished: %s', summary)
@@ -106,7 +133,11 @@ async def is_stale() -> bool:
     if len(sources) < len(companies):
         return True
     limit = datetime.now(UTC) - timedelta(hours=settings.jobs_refresh_hours)
-    return any(as_utc(s.last_fetched_at) is None or as_utc(s.last_fetched_at) < limit for s in sources)
+    if any(as_utc(s.last_fetched_at) is None or as_utc(s.last_fetched_at) < limit for s in sources):
+        return True
+    # Jobs stored before the skill rules changed (or before skills existed) need recalculating.
+    outdated = await JobPosting.find({'description': {'$ne': None}, 'skills.version': {'$ne': SKILLS_VERSION}}).count()
+    return outdated > 0
 
 
 def is_refreshing() -> bool:
@@ -150,5 +181,6 @@ async def load_description(posting: JobPosting) -> str | None:
         return None
     if description:
         posting.description = description
+        posting.skills = await asyncio.to_thread(job_skills, posting.title, description)
         await posting.save()
     return description

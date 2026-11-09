@@ -4,7 +4,7 @@ JobPosting is shared by all users (jobs are public data); nothing here is user-o
 JobSource remembers when each company was last fetched and whether it worked.
 """
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 import pymongo
 from beanie import Document, Indexed
@@ -24,6 +24,8 @@ class JobPosting(Document):
     level: str  # 'internship' | 'entry' | 'other'
     level_signal: str | None = None  # 'api' | 'title' | 'description'
     description: str | None = None  # None until loaded (some vendors need a second request)
+    # Keyword skills found in the description (see skills.job_skills): required, optional, languages, version.
+    skills: dict[str, Any] | None = None
     posted_at: datetime | None = None
     first_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
