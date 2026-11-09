@@ -23,6 +23,8 @@ from app.config import settings
 from app.integration.models import SavedCv
 from app.profiles.models import Profile
 from app.profiles.schemas import Education, Experience, Personal, Project
+from app.tailor.drafts import require_current_draft
+from app.tailor.grounding import content_revision
 from app.users.models import User
 
 router = APIRouter(prefix='/api/v1', tags=['frontend'])
@@ -217,8 +219,18 @@ async def cvs(user: CurrentUser):
     return [present_cv(c) for c in await SavedCv.find(SavedCv.user_id == user.id).to_list()]
 
 
+class CVCreateInput(CVInput):
+    tailorDraftId: str | None = None
+
+
 @router.post('/cvs', status_code=201)
-async def create_cv(data: CVInput, user: CurrentUser):
+async def create_cv(data: CVCreateInput, user: CurrentUser):
+    if data.tailorDraftId is not None:
+        draft = await require_current_draft(data.tailorDraftId, user)
+        if data.kind != 'tailored' or data.sourceCvId != str(draft.source_cv_id):
+            raise HTTPException(422, 'The tailored CV must use the source CV of the draft.')
+        if not data.content:
+            raise HTTPException(422, 'Provide the reviewed CV content.')
     content = data.content or (await read_profile(user))
     cv = SavedCv(user_id=user.id, name=data.name or 'Original CV', kind=data.kind or 'original',
                  job_title=data.jobTitle, company=data.company, match_id=data.matchId,
@@ -229,7 +241,8 @@ async def create_cv(data: CVInput, user: CurrentUser):
 
 @router.get('/cvs/{cv_id}')
 async def get_cv(cv_id: str, user: CurrentUser):
-    return present_cv(await owned_cv(cv_id, user))
+    cv = await owned_cv(cv_id, user)
+    return {**present_cv(cv), 'contentRevision': content_revision(cv.content)}
 
 
 @router.put('/cvs/{cv_id}')
@@ -272,6 +285,7 @@ async def saved_cv_pdf(cv_id: str, user: CurrentUser) -> Response:
 
 
 class PreviewInput(BaseModel):
+    tailorDraftId: str | None = None
     content: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -280,9 +294,10 @@ class PreviewInput(BaseModel):
 async def preview_cv_pdf(data: PreviewInput, user: CurrentUser) -> Response:
     """Render arbitrary (unsaved) CV content for the live builder preview.
 
-    Stateless: uses the same Harvard renderer as saved previews and downloads, and
-    never reads or writes any MongoDB record (only the authenticated user is needed).
+    Tailoring previews additionally verify their source draft. No records are written.
     """
+    if data.tailorDraftId is not None:
+        await require_current_draft(data.tailorDraftId, user)
     content = data.content or {}
     name = str(content.get('fullName') or user.full_name)
     email = str(content.get('email') or user.email)

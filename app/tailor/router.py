@@ -18,10 +18,11 @@ from app.config import settings
 from app.integration.models import SavedCv
 from app.matches.models import MatchRecord, MatchUsage
 from app.services import ai_tailoring
+from app.tailor.drafts import owned_draft
+from app.tailor.grounding import content_revision, safe_to_auto_apply, target_text
 from app.tailor.models import TailorDraft
 from app.tailor.schemas import (
     TAILORING_PROMPT_VERSION,
-    ChangeSection,
     CreateTailor,
     ProposedChange,
     TailoringAnalysis,
@@ -54,34 +55,6 @@ def cv_sections(content: dict[str, Any]) -> str:
     if c.get('skills'):
         lines.append(f'[skills] {", ".join(c["skills"])}')
     return '\n'.join(lines)
-
-
-def section_text(content: dict[str, Any], ch: ProposedChange) -> str | None:
-    """The actual existing CV text a change references (for factual grounding)."""
-    c = content or {}
-    if ch.section == ChangeSection.summary:
-        return (c.get('summary') or '').strip()
-    if ch.section == ChangeSection.skills:
-        return ', '.join(c.get('skills') or [])
-    if ch.section == ChangeSection.experience:
-        e = next((x for x in c.get('experience') or [] if str(x.get('id')) == str(ch.experience_id)), None)
-        bullets = (e or {}).get('bullets') or []
-        if e is not None and ch.bullet_index is not None and 0 <= ch.bullet_index < len(bullets):
-            return (bullets[ch.bullet_index] or '').strip()
-        return None
-    if ch.section == ChangeSection.project:
-        p = next((x for x in c.get('projects') or [] if str(x.get('id')) == str(ch.project_id)), None)
-        return (p.get('description') or '').strip() if p else None
-    return None
-
-
-def grounded(content: dict[str, Any], ch: ProposedChange) -> bool:
-    """True when the change's `original` matches the CV's real text at that section."""
-    actual = section_text(content, ch)
-    if not actual:
-        return False
-    o = ch.original.strip()
-    return o == actual or o in actual or actual in o
 
 
 def job_context_from_match(result: dict[str, Any]) -> str:
@@ -126,14 +99,14 @@ async def release_quota(user_id: PydanticObjectId) -> None:
 
 # --- presentation ----------------------------------------------------------------
 
-def _suggestion_dto(ch: ProposedChange, idx: int) -> dict[str, Any]:
+def _suggestion_dto(ch: ProposedChange, idx: int, original: str, review_required: bool) -> dict[str, Any]:
     dto: dict[str, Any] = {
         'id': f's{idx}',
         'section': ch.section.value,
-        'original': ch.original,
+        'original': original,
         'suggested': ch.suggested,
         'explanation': ch.explanation,
-        'reviewRequired': ch.review_required,
+        'reviewRequired': review_required,
     }
     if ch.experience_id is not None:
         dto['experienceId'] = str(ch.experience_id)
@@ -150,10 +123,13 @@ def present(draft: TailorDraft) -> dict[str, Any]:
     return {
         'id': str(draft.id),
         'sourceCvId': str(draft.source_cv_id),
+        'sourceCvRevision': draft.source_cv_revision,
         'matchId': draft.match_id,
         'jobTitle': draft.job_title,
         'company': draft.company or '',
-        'suggestions': draft.suggestions,
+        'suggestions': draft.suggestions if draft.source_cv_revision else [
+            {**suggestion, 'reviewRequired': True} for suggestion in draft.suggestions
+        ],
         'missingQualifications': draft.missing_qualifications,
         'questions': draft.clarifying_questions,
         'tokens': {'input': draft.input_tokens, 'output': draft.output_tokens},
@@ -210,12 +186,15 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
     if not sections.strip():
         raise HTTPException(422, 'This CV has no content to tailor yet.')
     cv_hash = _sha(sections)
+    revision = content_revision(cv.content)
     job_hash = _sha(f'{job_title.lower()}\n{job_context}')
 
     # Cache / dedup: identical tailoring for this user is reused (no OpenAI call, no quota).
     cutoff = datetime.now(UTC) - timedelta(hours=settings.tailor_cache_ttl_hours)
     cached = await TailorDraft.find(
         TailorDraft.user_id == user.id, TailorDraft.cv_hash == cv_hash, TailorDraft.job_hash == job_hash,
+        TailorDraft.source_cv_id == cv.id, TailorDraft.source_cv_revision == revision,
+        TailorDraft.match_id == match_id,
         TailorDraft.model == settings.openai_model, TailorDraft.prompt_version == TAILORING_PROMPT_VERSION,
         TailorDraft.created_at > cutoff,
     ).sort('-created_at').first_or_none()
@@ -235,15 +214,23 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
         raise HTTPException(status, message)
 
     analysis: TailoringAnalysis = out.analysis
-    # Factual grounding: flag any change whose "original" is not actually in the CV.
+    # Bind the exact target text, and accept at most one proposal for each target.
     suggestions = []
-    for i, ch in enumerate(analysis.changes):
-        if not grounded(cv.content, ch):
-            ch.review_required = True
-        suggestions.append(_suggestion_dto(ch, i))
+    seen_targets = set()
+    for i, change in enumerate(analysis.changes):
+        original = target_text(cv.content, change)
+        target = (change.section, change.experience_id, change.bullet_index, change.project_id)
+        if not original or not original.strip() or change.original.strip() != original.strip():
+            continue
+        if not change.suggested.strip() or target in seen_targets:
+            continue
+        seen_targets.add(target)
+        review_required = change.review_required or not safe_to_auto_apply(change, original, cv.content)
+        suggestions.append(_suggestion_dto(change, i, original, review_required))
 
     draft = TailorDraft(
-        user_id=user.id, source_cv_id=cv.id, match_id=match_id, job_title=job_title, company=company,
+        user_id=user.id, source_cv_id=cv.id, source_cv_revision=revision,
+        match_id=match_id, job_title=job_title, company=company,
         cv_hash=cv_hash, job_hash=job_hash, model=out.model, prompt_version=out.prompt_version,
         suggestions=suggestions,
         missing_qualifications=analysis.missing_qualifications,
@@ -257,11 +244,4 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
 
 @router.get('/tailor/{draft_id}')
 async def get_tailor(draft_id: str, user: CurrentUser):
-    try:
-        oid = PydanticObjectId(draft_id)
-    except (ValueError, TypeError, InvalidId):
-        raise HTTPException(404, 'Draft not found.')
-    draft = await TailorDraft.find_one(TailorDraft.id == oid, TailorDraft.user_id == user.id)
-    if not draft:
-        raise HTTPException(404, 'Draft not found.')
-    return present(draft)
+    return present(await owned_draft(draft_id, user))

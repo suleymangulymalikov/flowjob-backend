@@ -1,10 +1,12 @@
 """AI CV tailoring API tests. OpenAI is always mocked — no key, no network, no charges."""
+from beanie import PydanticObjectId
 import pytest
 
 from app.config import settings
 from app.services import ai_matching, ai_tailoring
 from app.services.ai_matching import Usage
 from app.services.ai_tailoring import TailoringResult
+from app.tailor.models import TailorDraft
 from app.tailor.schemas import ChangeSection, ProposedChange, TailoringAnalysis
 
 BASE = '/api/v1'
@@ -40,11 +42,11 @@ def tailoring(changes=None):
     if changes is None:
         changes = [
             ProposedChange(section=ChangeSection.summary, original=SUMMARY,
-                           suggested='Backend engineer who builds Python and MongoDB REST APIs.',
-                           explanation='Leads with backend.', job_requirement='Backend'),
+                           suggested=SUMMARY.removesuffix('.'),
+                           explanation='Consistent sentence punctuation.', job_requirement='Backend'),
             ProposedChange(section=ChangeSection.experience, experience_id='0', bullet_index=0, original=BULLET,
-                           suggested='Designed and built REST APIs in Python backed by MongoDB',
-                           explanation='Sharper verb; facts unchanged.'),
+                           suggested=BULLET + '.',
+                           explanation='Consistent bullet punctuation.'),
         ]
     return TailoringAnalysis(changes=changes, missing_qualifications=['Docker'], clarifying_questions=['Used Docker?'])
 
@@ -105,7 +107,8 @@ def test_successful_tailoring(client, mock_ai):
     assert d['suggestions'][0]['section'] == 'summary' and d['suggestions'][0]['original'] == SUMMARY
     assert d['missingQualifications'] == ['Docker'] and d['questions']
     assert d['tokens'] == {'input': 600, 'output': 300} and d['estimatedCostUsd'] > 0
-    assert all(s['reviewRequired'] is False for s in d['suggestions'])  # both grounded
+    assert all(s['reviewRequired'] is False for s in d['suggestions'])  # only formatting changed
+    assert d['sourceCvRevision'] == client.get(f'{BASE}/cvs/{cv}', headers=h).json()['contentRevision']
 
 
 def test_pii_minimized_in_sections(client, mock_ai):
@@ -118,18 +121,48 @@ def test_pii_minimized_in_sections(client, mock_ai):
         assert pii not in s
 
 
-def test_ungrounded_change_is_flagged_for_review(client, monkeypatch):
-    fabricated = tailoring(changes=[
-        ProposedChange(section=ChangeSection.experience, experience_id='0', bullet_index=0,
-                       original='Led a team of 50 engineers and raised revenue 300%',  # not in the CV
-                       suggested='Led a large team', explanation='x'),
+def test_invalid_proposals_are_discarded_without_losing_valid_changes(client, monkeypatch):
+    proposals = tailoring(changes=[
+        ProposedChange(section=ChangeSection.summary, original=original, suggested='Rewrite', explanation='x')
+        for original in ('', '  ', 'Engineer', 'Engineer who builds APIs. More details')
+    ] + [
+        ProposedChange(section=ChangeSection.experience, experience_id=item_id, bullet_index=index,
+                       original=BULLET, suggested=BULLET + '.', explanation='x')
+        for item_id, index in (('missing', 0), ('0', -1), ('0', 42), (None, 0))
+    ] + [
+        ProposedChange(section=ChangeSection.project, project_id='absent', original='A REST service',
+                       suggested='A REST service.', explanation='x'),
+        *tailoring().changes,
+        tailoring().changes[0],
     ])
     monkeypatch.setattr(ai_tailoring, 'analyze',
-                        lambda *a, **k: TailoringResult(analysis=fabricated, usage=Usage(1, 1), model=settings.openai_model))
+                        lambda *a: TailoringResult(analysis=proposals, usage=Usage(1, 1), model=settings.openai_model))
     h = signup(client)
     cv = make_cv(client, h)
-    d = tailor(client, h, cv).json()
-    assert d['suggestions'][0]['reviewRequired'] is True  # fabricated original -> flagged
+    r = tailor(client, h, cv)
+    assert r.status_code == 201, r.text
+    assert [s['original'] for s in r.json()['suggestions']] == [SUMMARY, BULLET]
+
+
+@pytest.mark.parametrize('suggested', [
+    'Engineer who builds APIs and has an AWS certification.',
+    'Engineer who builds APIs with Docker.',
+    'Engineer who built 300 APIs.',
+    'Engineer who leads the API team at Contoso.',
+    'Engineer who does not build APIs.',
+])
+def test_exact_source_does_not_auto_approve_new_claims(client, monkeypatch, suggested):
+    analysis = tailoring(changes=[
+        ProposedChange(section=ChangeSection.summary, original=SUMMARY, suggested=suggested,
+                       explanation='Claimed to be safe by the model.', review_required=False),
+        ProposedChange(section=ChangeSection.skills, original='Python, MongoDB', suggested='MongoDB, Python',
+                       explanation='Sort existing skills.', review_required=False),
+    ])
+    monkeypatch.setattr(ai_tailoring, 'analyze',
+                        lambda *a: TailoringResult(analysis=analysis, usage=Usage(1, 1), model=settings.openai_model))
+    h = signup(client)
+    result = tailor(client, h, make_cv(client, h)).json()
+    assert [s['reviewRequired'] for s in result['suggestions']] == [True, False]
 
 
 # --- original unchanged / save / multiple versions / source deletion -------------
@@ -157,7 +190,7 @@ def test_save_creates_independent_tailored_cv_and_leaves_original_unchanged(clie
     tailored_content = _apply_accepted(original, d['suggestions'], {'s0'})
     saved = client.post(f'{BASE}/cvs', headers=h, json={
         'name': 'Backend v1', 'kind': 'tailored', 'jobTitle': 'Backend Engineer', 'company': 'Acme',
-        'sourceCvId': cv_id, 'content': tailored_content}).json()
+        'sourceCvId': cv_id, 'tailorDraftId': d['id'], 'content': tailored_content}).json()
     assert saved['kind'] == 'tailored' and saved['sourceCvId'] == cv_id
     assert saved['content']['summary'] != SUMMARY  # accepted change applied
     assert saved['content']['experience'][0]['bullets'][0] == BULLET  # rejected change NOT applied
@@ -165,7 +198,7 @@ def test_save_creates_independent_tailored_cv_and_leaves_original_unchanged(clie
     assert client.get(f'{BASE}/cvs/{cv_id}', headers=h).json()['content'] == original
     # A second tailored version from the same original is independent.
     saved2 = client.post(f'{BASE}/cvs', headers=h, json={
-        'name': 'Backend v2', 'kind': 'tailored', 'sourceCvId': cv_id, 'content': tailored_content}).json()
+        'name': 'Backend v2', 'kind': 'tailored', 'sourceCvId': cv_id, 'tailorDraftId': d['id'], 'content': tailored_content}).json()
     assert saved2['id'] != saved['id']
     assert len(client.get(f'{BASE}/cvs', headers=h).json()) == 3  # original + 2 tailored
 
@@ -178,7 +211,7 @@ def test_saving_an_edited_suggestion(client, mock_ai):
     edited = __import__('copy').deepcopy(original)
     edited['summary'] = 'My own edited summary.'  # user edited the suggestion before saving
     saved = client.post(f'{BASE}/cvs', headers=h, json={
-        'name': 'Edited', 'kind': 'tailored', 'sourceCvId': cv_id, 'content': edited}).json()
+        'name': 'Edited', 'kind': 'tailored', 'sourceCvId': cv_id, 'tailorDraftId': d['id'], 'content': edited}).json()
     assert saved['content']['summary'] == 'My own edited summary.'
 
 
@@ -265,3 +298,70 @@ def test_direct_draft_is_retrievable_by_id_without_ai_or_match(client, mock_ai):
     bob = signup(client, 'bob@example.com')
     assert client.get(f'{BASE}/tailor/{created.json()["id"]}', headers=bob).status_code == 404
     assert client.get(f'{BASE}/tailor/000000000000000000000000', headers=h).status_code == 404
+
+
+@pytest.mark.parametrize('change', ['reorder', 'edit', 'other-section'])
+def test_stale_draft_cannot_preview_or_save(client, mock_ai, change):
+    h = signup(client)
+    cv = make_cv(client, h)
+    endpoint = f'{BASE}/cvs/{cv}'
+    content = client.get(endpoint, headers=h).json()['content']
+    content['experience'][0]['bullets'].append('Maintained the test suite')
+    assert client.put(endpoint, headers=h, json={'content': content}).status_code == 200
+    draft = tailor(client, h, cv).json()
+    reviewed = _apply_accepted(content, draft['suggestions'], {'s0', 's1'})
+    payload = {'content': reviewed, 'tailorDraftId': draft['id']}
+    preview = client.post(f'{BASE}/cvs/preview/pdf', headers=h, json=payload)
+    assert preview.status_code == 200 and preview.content.startswith(b'%PDF')
+    assert len(client.get(f'{BASE}/cvs', headers=h).json()) == 1  # preview/download is unsaved
+    if change == 'reorder':
+        content['experience'][0]['bullets'].reverse()
+    elif change == 'edit':
+        content['experience'][0]['bullets'][0] = 'Built Python command-line tools'
+    else:
+        content['location'] = 'Warsaw'  # Even a field omitted from the AI prompt changes the revision.
+    assert client.put(endpoint, headers=h, json={'content': content}).status_code == 200
+    assert client.post(f'{BASE}/cvs/preview/pdf', headers=h, json=payload).status_code == 409
+    assert client.post(f'{BASE}/cvs', headers=h, json={**payload, 'sourceCvId': cv, 'kind': 'tailored'}).status_code == 409
+    assert client.get(endpoint, headers=h).json()['content'] == content
+    assert len(client.get(f'{BASE}/cvs', headers=h).json()) == 1
+    assert mock_ai['calls'] == 1  # viewing or rejecting never regenerates
+    regenerated = tailor(client, h, cv).json()
+    assert regenerated['id'] != draft['id'] and regenerated['sourceCvRevision'] != draft['sourceCvRevision']
+
+
+def test_identical_cvs_do_not_share_drafts_and_cannot_swap_sources(client, mock_ai):
+    h = signup(client)
+    cv_a = make_cv(client, h, 'CV A')
+    cv_b = make_cv(client, h, 'CV B')
+    a = tailor(client, h, cv_a).json()
+    b = tailor(client, h, cv_b).json()
+    assert a['sourceCvRevision'] == b['sourceCvRevision']
+    assert a['id'] != b['id'] and b['sourceCvId'] == cv_b
+    content = client.get(f'{BASE}/cvs/{cv_b}', headers=h).json()['content']
+    payload = {'tailorDraftId': a['id'], 'content': content, 'kind': 'tailored', 'sourceCvId': cv_b}
+    assert client.post(f'{BASE}/cvs', headers=h, json=payload).status_code == 422
+    other = signup(client, 'other@example.com')
+    assert client.post(f'{BASE}/cvs/preview/pdf', headers=other, json=payload).status_code == 404
+    assert client.post(f'{BASE}/cvs', headers=other, json=payload).status_code == 404
+
+
+def test_legacy_draft_remains_readable_but_cannot_be_applied(client, mock_ai):
+    h = signup(client)
+    cv = make_cv(client, h)
+    draft = tailor(client, h, cv).json()
+
+    async def remove_revision():
+        await TailorDraft.get_pymongo_collection().update_one(
+            {'_id': PydanticObjectId(draft['id'])}, {'$unset': {'source_cv_revision': ''}},
+        )
+
+    client.portal.call(remove_revision)
+    response = client.get(f'{BASE}/tailor/{draft["id"]}', headers=h)
+    assert response.status_code == 200
+    assert response.json()['sourceCvRevision'] is None
+    assert all(s['reviewRequired'] for s in response.json()['suggestions'])
+    payload = {'tailorDraftId': draft['id'], 'content': {'summary': SUMMARY}}
+    assert client.post(f'{BASE}/cvs/preview/pdf', headers=h, json=payload).status_code == 409
+    assert client.post(f'{BASE}/cvs', headers=h, json={**payload, 'sourceCvId': cv, 'kind': 'tailored'}).status_code == 409
+    assert mock_ai['calls'] == 1

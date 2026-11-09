@@ -2,8 +2,8 @@
 
 `TailoringAnalysis` is the model's structured output: a bounded list of section-level change
 proposals, each tied to an existing CV section and carrying the ORIGINAL text it rewrites.
-The backend validates that `original` really exists in the CV (factual grounding) and only
-applies changes the user accepts — the model never replaces the CV wholesale.
+The backend verifies that `original` identifies an exact source target. Changes beyond
+verifiable formatting need explicit review before the frontend applies them.
 """
 from enum import Enum
 
