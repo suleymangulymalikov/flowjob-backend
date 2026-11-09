@@ -4,6 +4,7 @@ Every fetcher returns a list of plain dicts with the same keys (see `_job`). No 
 needed: these endpoints are published by the job-board vendors so companies can show their
 jobs on other sites. Each company is one HTTP request (SmartRecruiters: one per 100 jobs).
 """
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -55,17 +56,33 @@ def _job(source: dict, external_id: Any, title: str | None, location: str, url: 
     }
 
 
-async def _get(client: httpx.AsyncClient, url: str) -> Any:
+RETRY_STATUS = {429, 503}  # "too many requests" / "busy": wait and try again
+RETRY_WAITS = [2.0, 5.0, 10.0]  # seconds; a Retry-After header from the job board wins (capped at MAX_WAIT)
+MAX_WAIT = 30.0
+
+
+def _retry_after(r: httpx.Response, default: float) -> float:
     try:
-        r = await client.get(url, headers={'User-Agent': USER_AGENT, 'Accept': 'application/json'})
-    except httpx.HTTPError as e:
-        raise FetchError(f'{type(e).__name__} for {url}') from e
-    if r.status_code != 200:
-        raise FetchError(f'HTTP {r.status_code} for {url}')
-    try:
-        return r.json()
-    except ValueError as e:
-        raise FetchError(f'Not JSON: {url}') from e
+        return min(float(r.headers.get('Retry-After', default)), MAX_WAIT)
+    except ValueError:
+        return default
+
+
+async def _get(client: httpx.AsyncClient, url: str, sleep=asyncio.sleep) -> Any:
+    for attempt in range(len(RETRY_WAITS) + 1):
+        try:
+            r = await client.get(url, headers={'User-Agent': USER_AGENT, 'Accept': 'application/json'})
+        except httpx.HTTPError as e:
+            raise FetchError(f'{type(e).__name__} for {url}') from e
+        if r.status_code in RETRY_STATUS and attempt < len(RETRY_WAITS):
+            await sleep(_retry_after(r, RETRY_WAITS[attempt]))
+            continue
+        if r.status_code != 200:
+            raise FetchError(f'HTTP {r.status_code} for {url}')
+        try:
+            return r.json()
+        except ValueError as e:
+            raise FetchError(f'Not JSON: {url}') from e
 
 
 async def fetch_greenhouse(client: httpx.AsyncClient, source: dict) -> list[dict]:

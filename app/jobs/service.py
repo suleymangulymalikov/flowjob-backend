@@ -4,9 +4,13 @@
 - A refresh fetches every company (4 at a time) and updates MongoDB.
 - Refreshes run in the background, at most one at a time, only when the cache is older than
   JOBS_REFRESH_HOURS. Users always read from MongoDB, so the page stays fast.
-- If a job board is down, that company's previous jobs are kept and the error is recorded.
+- If a job board is down, that company's previous jobs are kept and the error is recorded;
+  failed companies are retried after FAILED_RETRY_MINUTES instead of the full interval.
+- Rate limits are respected: 429/503 answers are retried with a pause (fetchers._get) and
+  Workable boards are fetched one at a time.
 """
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -24,6 +28,8 @@ log = logging.getLogger(__name__)
 COMPANIES_FILE = Path(__file__).parent / 'companies.json'
 CONCURRENCY = 4
 DETAIL_CONCURRENCY = 4
+VENDOR_CONCURRENCY = {'workable': 1}
+FAILED_RETRY_MINUTES = 30
 
 _lock = asyncio.Lock()
 _task: asyncio.Task | None = None
@@ -127,10 +133,32 @@ async def refresh_all(companies: list[dict] | None = None, fetchers=FETCHERS) ->
 
         semaphore = asyncio.Semaphore(CONCURRENCY)
         detail_semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)  # shared: at most 4 description requests at once
+        # Some job boards rate-limit hard (Workable answers 429 to parallel requests): fewer at a time there.
+        vendor_semaphores = {v: asyncio.Semaphore(n) for v, n in VENDOR_CONCURRENCY.items()}
+        # Circuit breaker: once a job board still says "too many requests" after retrying, skip its other
+        # companies in this refresh (they keep their old jobs and are retried after FAILED_RETRY_MINUTES).
+        blocked: set[str] = set()
+
+        def guarded(vendor, fetch):
+            async def run(http, source):
+                if vendor in blocked:
+                    raise FetchError(f'Skipped: {vendor} is rate limiting this refresh')
+                try:
+                    return await fetch(http, source)
+                except FetchError as e:
+                    if 'HTTP 429' in str(e):
+                        blocked.add(vendor)
+                        log.warning('%s is rate limiting; skipping its other companies in this refresh', vendor)
+                    raise
+            return run
+        guarded_fetchers = {vendor: guarded(vendor, fetch) for vendor, fetch in fetchers.items()}
+
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             async def one(company):
-                async with semaphore:
-                    return await refresh_company(client, company, fetchers, detail_semaphore=detail_semaphore)
+                # Take the job board's own slot first, so waiting Workable companies don't block the others.
+                vendor_slot = vendor_semaphores.get(company['vendor']) or contextlib.nullcontext()
+                async with vendor_slot, semaphore:
+                    return await refresh_company(client, company, guarded_fetchers, detail_semaphore=detail_semaphore)
             counts = await asyncio.gather(*(one(c) for c in companies))
     summary = {'companies': len(companies), 'jobs': sum(counts)}
     log.info('Job refresh finished: %s', summary)
@@ -142,8 +170,13 @@ async def is_stale() -> bool:
     sources = await JobSource.find(In(JobSource.key, [source_key(c) for c in companies])).to_list()
     if len(sources) < len(companies):
         return True
-    limit = datetime.now(UTC) - timedelta(hours=settings.jobs_refresh_hours)
+    now = datetime.now(UTC)
+    limit = now - timedelta(hours=settings.jobs_refresh_hours)
     if any(as_utc(s.last_fetched_at) is None or as_utc(s.last_fetched_at) < limit for s in sources):
+        return True
+    # A company that failed (rate limit, timeout) is retried sooner than the normal interval.
+    retry_limit = now - timedelta(minutes=FAILED_RETRY_MINUTES)
+    if any(not s.last_ok and as_utc(s.last_fetched_at) < retry_limit for s in sources):
         return True
     # Jobs stored before the skill rules changed (or before skills existed) need recalculating.
     outdated = await JobPosting.find({'description': {'$ne': None}, 'skills.version': {'$ne': SKILLS_VERSION}}).count()
