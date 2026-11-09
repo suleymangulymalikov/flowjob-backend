@@ -104,6 +104,33 @@ def test_refresh_stores_skills_and_loads_missing_descriptions_once(client, monke
     assert calls == ['9']  # loaded once, kept on the next refresh
 
 
+def test_refresh_only_analyses_new_or_changed_jobs(client, monkeypatch):
+    analysed = []
+    real = service.job_skills
+
+    def counting(title, description):
+        analysed.append(title)
+        return real(title, description)
+    monkeypatch.setattr(service, 'job_skills', counting)
+    company = {'company': 'Acme', 'vendor': 'greenhouse', 'slug': 'acme'}
+    board = [job('1', 'Junior Dev', description='Requirements\n- Python'), job('2', 'Intern', description='Requirements\n- SQL')]
+
+    async def fetch(http, source):
+        return [{**j, 'company': source['company'], 'vendor': source['vendor'], 'slug': source['slug']} for j in board]
+
+    async def run():
+        async with httpx.AsyncClient() as http:
+            await service.refresh_company(http, company, {'greenhouse': fetch})
+    client.portal.call(run)
+    assert sorted(analysed) == ['Intern', 'Junior Dev']
+    analysed.clear()
+    client.portal.call(run)  # nothing changed
+    assert analysed == []
+    board[1] = job('2', 'Intern', description='Requirements\n- SQL and Excel')  # description edited
+    client.portal.call(run)
+    assert analysed == ['Intern']
+
+
 # --- API ---------------------------------------------------------------------------------------------
 
 def make_cv(client, headers, skills):

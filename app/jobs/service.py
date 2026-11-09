@@ -44,11 +44,20 @@ def as_utc(d: datetime | None) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=UTC)
 
 
-async def _with_skills(jobs: list[dict]) -> list[dict]:
-    """Add keyword skills to each job. Runs in a worker thread: ~20 ms per job of CPU work
-    must not block the web server while users are browsing."""
+def _reusable_skills(old: JobPosting | None, job: dict) -> dict | None:
+    """Skills stored last time, if the job's title and description did not change since."""
+    if (old and old.skills and old.skills.get('version') == SKILLS_VERSION
+            and old.title == job['title'] and old.description == job['description']):
+        return old.skills
+    return None
+
+
+async def _with_skills(jobs: list[dict], previous: list[JobPosting | None]) -> list[dict]:
+    """Add keyword skills to each job. Only new or changed jobs are analysed (~20 ms each),
+    in a worker thread so the web server stays responsive while users are browsing."""
     def compute():
-        return [{**j, 'skills': job_skills(j['title'], j['description'])} for j in jobs]
+        return [{**j, 'skills': _reusable_skills(old, j) or job_skills(j['title'], j['description'])}
+                for j, old in zip(jobs, previous)]
     return await asyncio.to_thread(compute)
 
 
@@ -86,7 +95,8 @@ async def refresh_company(client: httpx.AsyncClient, company: dict, fetchers=FET
         return job
 
     completed = await asyncio.gather(*(complete(k, j) for k, j in fresh.items()))
-    for posting_key, job in zip(fresh, await _with_skills(list(completed))):
+    analysed = await _with_skills(list(completed), [existing.get(k) for k in fresh])
+    for posting_key, job in zip(fresh, analysed):
         posting = existing.get(posting_key)
         if posting:
             for field, value in job.items():
