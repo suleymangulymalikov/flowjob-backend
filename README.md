@@ -33,9 +33,21 @@ Requires [uv](https://docs.astral.sh/uv/) and a MongoDB database (e.g. a free [M
 
 ```bash
 uv run fastapi dev       # run dev server at http://127.0.0.1:8000 (docs at /docs)
-uv run pytest            # run tests
 ```
 
-Tests use the `MONGODB_URI` from `.env` but always the separate `flowjob_test` database, which they clear between tests.
-
 The server checks the database connection on startup and exits if it can't reach MongoDB.
+
+## Tests
+
+Install MongoDB 8.0 locally on macOS or Linux so the `mongod` executable is available. From the repository root:
+
+```sh
+uv sync --locked
+env -u MONGODB_URI -u MONGODB_DB_NAME FLOWJOB_TEST_MONGOD=mongod uv run --locked pytest
+```
+
+Set `FLOWJOB_TEST_MONGOD=/path/to/mongod` if it isn't on your PATH. You can append a test path or pytest filter as usual. The setting is required even for collection, because test modules import application code.
+
+Pytest starts and verifies its own MongoDB process before collecting tests. It listens only on a private Unix socket and uses a fresh data directory and a randomly named database for each run. The HTTP test fixture clears only that database between tests. Pytest shuts down the process and removes its directory at the end of the run.
+
+The test runner rejects exported MongoDB settings, including Atlas, localhost and an explicit database name. It ignores the development `.env` and sets a throwaway JWT signing secret and `OPENAI_API_KEY=mock`. CI uses the same launcher with MongoDB 8.0 inside the test job.
