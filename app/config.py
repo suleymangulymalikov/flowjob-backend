@@ -33,5 +33,9 @@ class Settings(BaseSettings):
     tailor_cache_ttl_hours: int = 720
     ai_global_daily_quota: int = 500
 
+    # Job listings (public job-board APIs, no key, no cost). Set JOBS_LIVE_FETCH=false to never call them.
+    jobs_live_fetch: bool = True
+    jobs_refresh_hours: float = 6.0
+
 
 settings = Settings()

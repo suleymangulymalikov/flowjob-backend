@@ -1,0 +1,212 @@
+[
+ {
+  "company": "InPost",
+  "vendor": "smartrecruiters",
+  "slug": "InPost"
+ },
+ {
+  "company": "Bosch Group",
+  "vendor": "smartrecruiters",
+  "slug": "BoschGroup"
+ },
+ {
+  "company": "CD PROJEKT RED",
+  "vendor": "smartrecruiters",
+  "slug": "cdprojektred"
+ },
+ {
+  "company": "ElevenLabs",
+  "vendor": "ashby",
+  "slug": "elevenlabs"
+ },
+ {
+  "company": "Lingaro",
+  "vendor": "lever",
+  "slug": "lingarogroup"
+ },
+ {
+  "company": "Elastic",
+  "vendor": "greenhouse",
+  "slug": "elastic"
+ },
+ {
+  "company": "Veeva Systems",
+  "vendor": "lever",
+  "slug": "veeva"
+ },
+ {
+  "company": "n8n",
+  "vendor": "ashby",
+  "slug": "n8n"
+ },
+ {
+  "company": "JetBrains",
+  "vendor": "greenhouse",
+  "slug": "jetbrains"
+ },
+ {
+  "company": "Netguru",
+  "vendor": "workable",
+  "slug": "netguru"
+ },
+ {
+  "company": "Asana",
+  "vendor": "greenhouse",
+  "slug": "asana"
+ },
+ {
+  "company": "Docplanner (ZnanyLekarz)",
+  "vendor": "ashby",
+  "slug": "docplanner"
+ },
+ {
+  "company": "Monterail",
+  "vendor": "workable",
+  "slug": "monterail"
+ },
+ {
+  "company": "GitLab",
+  "vendor": "greenhouse",
+  "slug": "gitlab"
+ },
+ {
+  "company": "Pragmatic Coders",
+  "vendor": "recruitee",
+  "slug": "pragmaticcoders"
+ },
+ {
+  "company": "The Codest",
+  "vendor": "recruitee",
+  "slug": "thecodest"
+ },
+ {
+  "company": "Oyster HR",
+  "vendor": "ashby",
+  "slug": "oyster"
+ },
+ {
+  "company": "Wabtec",
+  "vendor": "smartrecruiters",
+  "slug": "Wabtec"
+ },
+ {
+  "company": "Huuuge Games",
+  "vendor": "recruitee",
+  "slug": "huuuge"
+ },
+ {
+  "company": "Text (LiveChat)",
+  "vendor": "lever",
+  "slug": "text"
+ },
+ {
+  "company": "Ten Square Games",
+  "vendor": "recruitee",
+  "slug": "tensquaregames"
+ },
+ {
+  "company": "11 bit studios",
+  "vendor": "recruitee",
+  "slug": "11bitstudios"
+ },
+ {
+  "company": "ClickHouse",
+  "vendor": "ashby",
+  "slug": "clickhouse"
+ },
+ {
+  "company": "AppUnite",
+  "vendor": "recruitee",
+  "slug": "appunite"
+ },
+ {
+  "company": "SumUp",
+  "vendor": "greenhouse",
+  "slug": "sumup"
+ },
+ {
+  "company": "Codibly",
+  "vendor": "smartrecruiters",
+  "slug": "Codibly"
+ },
+ {
+  "company": "Stripe",
+  "vendor": "greenhouse",
+  "slug": "stripe"
+ },
+ {
+  "company": "Attio",
+  "vendor": "ashby",
+  "slug": "attio"
+ },
+ {
+  "company": "Endava",
+  "vendor": "smartrecruiters",
+  "slug": "Endava"
+ },
+ {
+  "company": "MongoDB",
+  "vendor": "greenhouse",
+  "slug": "mongodb"
+ },
+ {
+  "company": "Okta",
+  "vendor": "greenhouse",
+  "slug": "okta"
+ },
+ {
+  "company": "Samsara",
+  "vendor": "greenhouse",
+  "slug": "samsara"
+ },
+ {
+  "company": "Dropbox",
+  "vendor": "greenhouse",
+  "slug": "dropbox"
+ },
+ {
+  "company": "Payoneer",
+  "vendor": "greenhouse",
+  "slug": "payoneer"
+ },
+ {
+  "company": "AppsFlyer",
+  "vendor": "greenhouse",
+  "slug": "appsflyer"
+ },
+ {
+  "company": "Bitpanda",
+  "vendor": "greenhouse",
+  "slug": "bitpanda"
+ },
+ {
+  "company": "Palantir",
+  "vendor": "lever",
+  "slug": "palantir"
+ },
+ {
+  "company": "RWS",
+  "vendor": "lever",
+  "slug": "rws"
+ },
+ {
+  "company": "Avery Dennison",
+  "vendor": "smartrecruiters",
+  "slug": "AveryDennison"
+ },
+ {
+  "company": "Tooploox",
+  "vendor": "ashby",
+  "slug": "tooploox"
+ },
+ {
+  "company": "Datadog",
+  "vendor": "greenhouse",
+  "slug": "datadog"
+ },
+ {
+  "company": "Taboola",
+  "vendor": "greenhouse",
+  "slug": "taboola"
+ }
+]
