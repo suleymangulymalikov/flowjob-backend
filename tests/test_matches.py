@@ -79,6 +79,7 @@ def mock_ai(monkeypatch):
 def test_requires_auth(client):
     assert client.post(f'{BASE}/matches', json={'cvId': 'x', 'jobTitle': 'Dev', 'jobDescription': JOB}).status_code == 401
     assert client.get(f'{BASE}/matches').status_code == 401
+    assert client.delete(f'{BASE}/matches/000000000000000000000001').status_code == 401
 
 
 def test_invalid_cv_id(client, mock_ai):
@@ -235,3 +236,74 @@ def test_list_and_get_and_ownership(client, mock_ai):
     bob = signup(client, 'bob@example.com')
     assert client.get(f'{BASE}/matches/{mid}', headers=bob).status_code == 404
     assert client.get(f'{BASE}/matches/not-an-id', headers=bob).status_code == 404
+
+
+def test_delete_match_evicts_it_from_history_and_analysis_reuse(client, mock_ai):
+    h = signup(client)
+    cv = make_cv(client, h)
+    request = {'cvId': cv, 'jobTitle': 'Dev', 'jobDescription': JOB}
+    original = client.post(f'{BASE}/matches', headers=h, json=request).json()
+    assert client.post(f'{BASE}/matches', headers=h, json=request).json()['id'] == original['id']
+    assert mock_ai['calls'] == 1
+
+    url = f'{BASE}/matches/{original["id"]}'
+    deleted = client.delete(url, headers=h)
+    assert deleted.status_code == 204 and deleted.content == b''
+    assert client.get(url, headers=h).status_code == 404
+    assert client.delete(url, headers=h).status_code == 404
+    assert client.get(f'{BASE}/matches', headers=h).json() == []
+    assert mock_ai['calls'] == 1
+
+    fresh = client.post(f'{BASE}/matches', headers=h, json=request)
+    assert fresh.status_code == 201 and fresh.json()['id'] != original['id']
+    assert mock_ai['calls'] == 2
+
+
+def test_delete_match_returns_same_404_for_foreign_missing_and_invalid_ids(client, mock_ai):
+    owner = signup(client)
+    cv = make_cv(client, owner)
+    match = client.post(f'{BASE}/matches', headers=owner,
+                        json={'cvId': cv, 'jobTitle': 'Dev', 'jobDescription': JOB}).json()
+    other = signup(client, 'other@example.com')
+    url = f'{BASE}/matches/{match["id"]}'
+    for response in (
+        client.delete(url, headers=other),
+        client.delete(f'{BASE}/matches/000000000000000000000001', headers=owner),
+        client.delete(f'{BASE}/matches/not-an-id', headers=owner),
+    ):
+        assert response.status_code == 404 and response.json() == {'detail': 'Match not found'}
+    assert client.get(url, headers=owner).status_code == 200
+
+
+def test_delete_match_preserves_cvs_drafts_application_history_and_other_matches(client, mock_ai):
+    h = signup(client)
+    cv = make_cv(client, h)
+    payload = {'cvId': cv, 'jobTitle': 'Dev', 'jobDescription': JOB, 'company': 'Example'}
+    match = client.post(f'{BASE}/matches', headers=h, json=payload).json()
+    unrelated = client.post(f'{BASE}/matches', headers=h, json={**payload, 'jobTitle': 'QA'}).json()
+    source = client.get(f'{BASE}/cvs/{cv}', headers=h).json()
+    generated = client.post(f'{BASE}/tailor', headers=h, json={'matchId': match['id']})
+    assert generated.status_code == 201, generated.text
+    draft_id = generated.json()['id']
+    tailored = client.post(f'{BASE}/cvs', headers=h, json={
+        'kind': 'tailored', 'sourceCvId': cv, 'content': source['content'],
+        'matchId': match['id'], 'tailorDraftId': draft_id,
+    })
+    assert tailored.status_code == 201, tailored.text
+    tailored_id = tailored.json()['id']
+    application = client.post(f'{BASE}/applications', headers=h, json={
+        'company': 'Example', 'jobTitle': 'Dev', 'status': 'Applied', 'cvId': tailored_id,
+        'notes': 'Historical application note', 'dateApplied': '2025-01-10',
+    })
+    assert application.status_code == 201, application.text
+    preserved_urls = [
+        f'{BASE}/cvs/{cv}', f'{BASE}/cvs/{tailored_id}', f'{BASE}/tailor/{draft_id}',
+        f'{BASE}/applications/{application.json()["id"]}', f'{BASE}/matches/{unrelated["id"]}',
+    ]
+    before = [client.get(url, headers=h).json() for url in preserved_urls]
+
+    assert client.delete(f'{BASE}/matches/{match["id"]}', headers=h).status_code == 204
+
+    assert [client.get(url, headers=h).json() for url in preserved_urls] == before
+    assert [entry['id'] for entry in client.get(f'{BASE}/matches', headers=h).json()] == [unrelated['id']]
+    assert mock_ai['calls'] == 2

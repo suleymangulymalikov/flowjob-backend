@@ -185,7 +185,7 @@ async def create_match(data: CreateMatch, user: CurrentUser):
     cv_hash = _sha(evidence)
     job_hash = _sha(f'{data.jobTitle.strip().lower()}\n{job}')
 
-    # Cache / dedup: an identical analysis for this user is reused (no OpenAI call, no quota).
+    # Look up reusable analyses in MongoDB so a deleted report cannot be reused.
     cutoff = datetime.now(UTC) - timedelta(hours=settings.match_cache_ttl_hours)
     cached = await MatchRecord.find(
         MatchRecord.user_id == user.id,
@@ -194,6 +194,7 @@ async def create_match(data: CreateMatch, user: CurrentUser):
         MatchRecord.model == settings.openai_model,
         MatchRecord.prompt_version == PROMPT_VERSION,
         MatchRecord.created_at > cutoff,
+        ignore_cache=True,
     ).sort('-created_at').first_or_none()
     if cached:
         return present(cached)
@@ -238,13 +239,25 @@ async def list_matches(user: CurrentUser):
     return [present(r) for r in records]
 
 
-@router.get('/matches/{match_id}')
-async def get_match(match_id: str, user: CurrentUser):
+def owned_match_query(match_id: str, user: User):
     try:
         oid = PydanticObjectId(match_id)
     except (ValueError, TypeError, InvalidId):
         raise HTTPException(404, 'Match not found')
-    record = await MatchRecord.find_one(MatchRecord.id == oid, MatchRecord.user_id == user.id)
+    return MatchRecord.find_one(MatchRecord.id == oid, MatchRecord.user_id == user.id, ignore_cache=True)
+
+
+@router.get('/matches/{match_id}')
+async def get_match(match_id: str, user: CurrentUser):
+    record = await owned_match_query(match_id, user)
     if not record:
         raise HTTPException(404, 'Match not found')
     return present(record)
+
+
+@router.delete('/matches/{match_id}', status_code=204)
+async def delete_match(match_id: str, user: CurrentUser):
+    # Apply the owner filter in the delete itself. Other records keep their history and provenance.
+    result = await owned_match_query(match_id, user).delete()
+    if result is None or result.deleted_count == 0:
+        raise HTTPException(404, 'Match not found')
