@@ -25,7 +25,9 @@ from app.tailor.schemas import (
     TAILORING_PROMPT_VERSION,
     CreateTailor,
     ProposedChange,
+    TailorDraftResponse,
     TailoringAnalysis,
+    VerifiedTailorDraftResponse,
 )
 from app.users.models import User
 
@@ -154,7 +156,13 @@ _ERRS = {
 }
 
 
-@router.post('/tailor', status_code=201)
+@router.get('/tailor/capabilities')
+async def tailoring_capabilities() -> dict[str, int]:
+    # The UI checks compatibility before making a potentially billable request.
+    return {'sourceVerification': 1}
+
+
+@router.post('/tailor', status_code=201, response_model=VerifiedTailorDraftResponse)
 async def create_tailor(data: CreateTailor, user: CurrentUser):
     # Resolve the source CV + job context — reusing an existing match when given (no re-analysis).
     match_id = None
@@ -168,6 +176,8 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
             raise HTTPException(404, 'Match not found.')
         match_id = str(match.id)
         cv = await _owned_cv(match.cv_id, user)
+        if data.cvId is not None and data.cvId != str(cv.id):
+            raise HTTPException(422, 'This match belongs to a different CV. Start a draft from the job form.')
         job_title = match.job_title
         company = match.company
         job_context = job_context_from_match(match.result)
@@ -189,17 +199,19 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
     revision = content_revision(cv.content)
     job_hash = _sha(f'{job_title.lower()}\n{job_context}')
 
-    # Cache / dedup: identical tailoring for this user is reused (no OpenAI call, no quota).
-    cutoff = datetime.now(UTC) - timedelta(hours=settings.tailor_cache_ttl_hours)
-    cached = await TailorDraft.find(
-        TailorDraft.user_id == user.id, TailorDraft.cv_hash == cv_hash, TailorDraft.job_hash == job_hash,
-        TailorDraft.source_cv_id == cv.id, TailorDraft.source_cv_revision == revision,
-        TailorDraft.match_id == match_id,
-        TailorDraft.model == settings.openai_model, TailorDraft.prompt_version == TAILORING_PROMPT_VERSION,
-        TailorDraft.created_at > cutoff,
-    ).sort('-created_at').first_or_none()
-    if cached:
-        return present(cached)
+    # Legacy drafts have no source revision, so they never qualify for reuse.
+    # Only an explicit fresh request can bypass an otherwise verified cache hit.
+    if not data.fresh:
+        cutoff = datetime.now(UTC) - timedelta(hours=settings.tailor_cache_ttl_hours)
+        cached = await TailorDraft.find(
+            TailorDraft.user_id == user.id, TailorDraft.cv_hash == cv_hash, TailorDraft.job_hash == job_hash,
+            TailorDraft.source_cv_id == cv.id, TailorDraft.source_cv_revision == revision,
+            TailorDraft.match_id == match_id, TailorDraft.company == company,
+            TailorDraft.model == settings.openai_model, TailorDraft.prompt_version == TAILORING_PROMPT_VERSION,
+            TailorDraft.created_at > cutoff,
+        ).sort('-created_at').first_or_none()
+        if cached:
+            return present(cached)
 
     await reserve_quota(user.id)
     try:
@@ -242,6 +254,6 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
     return present(draft)
 
 
-@router.get('/tailor/{draft_id}')
+@router.get('/tailor/{draft_id}', response_model=TailorDraftResponse)
 async def get_tailor(draft_id: str, user: CurrentUser):
     return present(await owned_draft(draft_id, user))

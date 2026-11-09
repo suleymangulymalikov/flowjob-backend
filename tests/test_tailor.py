@@ -365,3 +365,64 @@ def test_legacy_draft_remains_readable_but_cannot_be_applied(client, mock_ai):
     assert client.post(f'{BASE}/cvs/preview/pdf', headers=h, json=payload).status_code == 409
     assert client.post(f'{BASE}/cvs', headers=h, json={**payload, 'sourceCvId': cv, 'kind': 'tailored'}).status_code == 409
     assert mock_ai['calls'] == 1
+
+
+    created = tailor(client, h, cv).json()
+    assert created['id'] != draft['id'] and created['sourceCvRevision']
+    assert created['suggestions'][1]['original'] == BULLET
+    assert mock_ai['calls'] == 2
+
+
+def test_new_job_draft_has_revision_and_target_metadata(client, mock_ai):
+    assert client.get(f'{BASE}/tailor/capabilities').json() == {'sourceVerification': 1}
+    h = signup(client)
+    cv = make_cv(client, h)
+    previous = tailor(client, h, cv).json()
+    r = tailor(client, h, cv, jobTitle='Product Quality Analyst', company='Example Analytics',
+               jobDescription='Product analyst. ' + JOB)
+    assert r.status_code == 201, r.text
+    created = r.json()
+    source = client.get(f'{BASE}/cvs/{cv}', headers=h).json()
+    assert created['id'] != previous['id']
+    assert created['sourceCvId'] == cv and created['sourceCvRevision'] == source['contentRevision']
+    assert created['suggestions'][1] == {
+        'id': 's1', 'section': 'experience', 'original': BULLET, 'suggested': BULLET + '.',
+        'explanation': 'Consistent bullet punctuation.', 'reviewRequired': False,
+        'experienceId': '0', 'bulletIndex': 0,
+    }
+    retrieved = client.get(f'{BASE}/tailor/{created["id"]}', headers=h).json()
+    for key in ('id', 'sourceCvId', 'sourceCvRevision', 'jobTitle', 'company', 'suggestions'):
+        assert retrieved[key] == created[key]
+
+    reviewed = _apply_accepted(source['content'], created['suggestions'], {'s0', 's1'})
+    payload = {'content': reviewed, 'tailorDraftId': created['id']}
+    pdf = client.post(f'{BASE}/cvs/preview/pdf', headers=h, json=payload)
+    assert pdf.status_code == 200 and pdf.content.startswith(b'%PDF')
+    assert len(client.get(f'{BASE}/cvs', headers=h).json()) == 1
+    saved = client.post(f'{BASE}/cvs', headers=h, json={**payload, 'kind': 'tailored', 'sourceCvId': cv})
+    assert saved.status_code == 201 and saved.json()['id'] != cv
+    assert saved.json()['content'] == reviewed
+    assert client.get(f'{BASE}/cvs/{cv}', headers=h).json()['content'] == source['content']
+    assert mock_ai['calls'] == 2
+
+
+def test_company_changes_do_not_reuse_a_different_jobs_draft(client, mock_ai):
+    h = signup(client)
+    cv = make_cv(client, h)
+    old = tailor(client, h, cv, company='Example One').json()
+    new = tailor(client, h, cv, company='Example Two').json()
+    assert new['id'] != old['id'] and new['company'] == 'Example Two'
+    assert tailor(client, h, cv, company='Example Two').json()['id'] == new['id']
+    assert mock_ai['calls'] == 2
+
+
+def test_explicit_fresh_request_bypasses_verified_cache(client, mock_ai):
+    h = signup(client)
+    cv = make_cv(client, h)
+    first = tailor(client, h, cv).json()
+    assert client.get(f'{BASE}/tailor/{first["id"]}', headers=h).status_code == 200
+    assert tailor(client, h, cv).json()['id'] == first['id']
+    assert mock_ai['calls'] == 1
+    fresh = tailor(client, h, cv, fresh=True).json()
+    assert fresh['id'] != first['id'] and fresh['sourceCvRevision'] == first['sourceCvRevision']
+    assert mock_ai['calls'] == 2

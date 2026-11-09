@@ -37,6 +37,11 @@ uv run fastapi dev       # run dev server at http://127.0.0.1:8000 (docs at /doc
 
 The server checks the database connection on startup and exits if it can't reach MongoDB.
 
+After switching branches or updating API code, restart any backend started without reload.
+For the source-verified tailoring frontend, check that
+`curl http://127.0.0.1:8000/api/v1/tailor/capabilities` returns
+`{"sourceVerification":1}`. This probe does not generate a draft or need a user session.
+
 ## Tests
 
 Install MongoDB 8.0 locally on macOS or Linux so the `mongod` executable is available. From the repository root:

@@ -6,6 +6,7 @@ The backend verifies that `original` identifies an exact source target. Changes 
 verifiable formatting need explicit review before the frontend applies them.
 """
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -48,3 +49,23 @@ class CreateTailor(BaseModel):
     jobTitle: str | None = Field(default=None, max_length=200)
     jobDescription: str | None = None
     company: str | None = Field(default=None, max_length=200)
+    fresh: bool = False
+
+
+class TailorDraftResponse(BaseModel):
+    id: str
+    sourceCvId: str
+    sourceCvRevision: str | None  # Explicit null identifies a stored legacy draft.
+    matchId: str | None
+    jobTitle: str
+    company: str
+    suggestions: list[dict[str, Any]]
+    missingQualifications: list[str]
+    questions: list[str]
+    tokens: dict[str, int]
+    estimatedCostUsd: float
+    createdAt: str
+
+
+class VerifiedTailorDraftResponse(TailorDraftResponse):
+    sourceCvRevision: str = Field(min_length=1)
