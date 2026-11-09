@@ -132,3 +132,38 @@ def test_preview_pdf_handles_empty_and_multipage(client):
     big = {**RICH_CONTENT, 'experience': RICH_CONTENT['experience'] * 40}
     res = client.post(f'{BASE}/cvs/preview/pdf', json={'content': big}, headers=headers)
     assert res.status_code == 200 and res.content[:5] == b'%PDF-'
+
+
+# --- contact links: LinkedIn / GitHub shown as clickable labels --------------
+
+def _contact_html(links):
+    ctx = build_cv_context('Jane Doe', 'jane@example.com', {**RICH_CONTENT, 'links': links})
+    return env.get_template('harvard.html').render(**ctx, font_size=11, margin=0.75)
+
+
+def test_linkedin_and_github_render_as_labelled_links_not_raw_urls():
+    html = _contact_html(['linkedin.com/in/jane', 'https://github.com/jane'])
+    assert '>LinkedIn</a>' in html and '>GitHub</a>' in html
+    assert 'href="https://linkedin.com/in/jane"' in html and 'href="https://github.com/jane"' in html
+    assert '>linkedin.com/in/jane<' not in html and '>https://github.com/jane<' not in html
+    assert 'color:inherit;text-decoration:none' in html  # keeps the Harvard look (no blue underline)
+
+
+def test_unrelated_and_unsafe_legacy_links_are_kept_verbatim_and_never_linked():
+    html = _contact_html(['https://janedoe.dev', 'javascript:alert(1)', 'https://evil.com/linkedin.com', 'portfolio'])
+    for raw in ('https://janedoe.dev', 'javascript:alert(1)', 'https://evil.com/linkedin.com', 'portfolio'):
+        assert raw in html
+    assert '<a href' not in html
+
+
+def test_link_values_are_html_escaped():
+    html = _contact_html(['"><script>x</script>'])
+    assert '<script>x</script>' not in html
+
+
+def test_labelled_links_are_clickable_in_the_pdf_and_labels_replace_urls():
+    html = _contact_html(['linkedin.com/in/jane', 'github.com/jane'])
+    pdf = HTML(string=html).write_pdf(uncompressed_pdf=True)
+    assert b'/URI (https://linkedin.com/in/jane)' in pdf and b'/URI (https://github.com/jane)' in pdf
+    # The production render path produces a valid PDF with the same links.
+    assert render_saved_cv_pdf('Jane Doe', 'jane@example.com', {**RICH_CONTENT, 'links': ['github.com/jane']})[:5] == b'%PDF-'

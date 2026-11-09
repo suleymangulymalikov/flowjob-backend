@@ -246,3 +246,22 @@ def test_match_reuse_path(client, monkeypatch):
     # A match belonging to another user cannot be used.
     bob = signup(client, 'bob@example.com')
     assert client.post(f'{BASE}/tailor', headers=bob, json={'matchId': mid}).status_code == 404
+
+
+def test_direct_draft_is_retrievable_by_id_without_ai_or_match(client, mock_ai):
+    """Direct tailoring (no matchId) leaves a draft that GET /tailor/{id} can re-read after a refresh."""
+    h = signup(client)
+    cv = make_cv(client, h)
+    created = tailor(client, h, cv, company='Acme')
+    assert created.status_code == 201 and created.json()['matchId'] is None
+    assert mock_ai['calls'] == 1
+    strip = lambda d: {k: v for k, v in d.items() if k != 'createdAt'}  # tz formatting differs after a DB round-trip
+    for _ in range(2):  # reopening/refreshing the draft route
+        got = client.get(f'{BASE}/tailor/{created.json()["id"]}', headers=h)
+        assert got.status_code == 200 and strip(got.json()) == strip(created.json())
+    assert mock_ai['calls'] == 1  # reads never call the AI provider
+    assert client.get(f'{BASE}/matches', headers=h).json() == []  # no match record was created
+    # Another user cannot read it; unknown ids are a plain 404.
+    bob = signup(client, 'bob@example.com')
+    assert client.get(f'{BASE}/tailor/{created.json()["id"]}', headers=bob).status_code == 404
+    assert client.get(f'{BASE}/tailor/000000000000000000000000', headers=h).status_code == 404
