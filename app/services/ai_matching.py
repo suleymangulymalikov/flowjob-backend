@@ -37,7 +37,25 @@ SYSTEM_PROMPT = (
     'each, the evidence status and a short grounded evidence note (or "Not mentioned in the CV").\n'
     '- Do NOT output a numeric score; the application computes it from your requirement '
     'assessments. Set enough_info=false if the post lacks enough identifiable requirements.\n'
-    '- Keep every text field concise and professional.'
+    '- Keep every text field concise and professional.\n'
+    '\n'
+    'VOICE AND CONTENT (applies to every free-text field you write: overall_assessment, '
+    'evidence, strengths, areas_to_improve, recommendations, suggested_wording and '
+    'clarifying_questions):\n'
+    '- Speak directly to the person who owns the CV, in the second person: "Your CV shows ...", '
+    '"You list ...", "Your summary could ...". Never write "the candidate", "the applicant", '
+    '"he", "she" or "they" for the CV owner.\n'
+    '- overall_assessment: two or three sentences. Name the one or two strongest, best-evidenced '
+    'matches and the single biggest gap, in plain language, without listing every requirement.\n'
+    '- Never imply a skill is absent just because the CV does not mention it. Say it is "not '
+    'shown in your CV" or "not clear from your CV" and, where useful, invite the user to add it '
+    'only if it is true. Do not say "you lack", "you do not have" or "you are missing" a skill '
+    'unless the CV explicitly says so.\n'
+    '- For a requirement with no CV evidence, set evidence to "Not shown in your CV."\n'
+    '- recommendations: at most three concrete changes to the CV itself, each tied to specific '
+    'CV evidence you can point to (for example a bullet or project to move up, quantify or '
+    'name more precisely). Return an empty list when the CV does not support a specific, '
+    'truthful improvement; never pad the list or suggest adding experience the CV does not show.'
 )
 
 
@@ -81,25 +99,25 @@ def _mock_result() -> AnalysisResult:
         requirements=[
             RequirementAssessment(requirement='Python', importance=Importance.required,
                                   status=EvidenceStatus.clearly_demonstrated,
-                                  evidence='CV lists building REST APIs with Python at Acme.'),
+                                  evidence='Your CV lists building REST APIs with Python at Acme.'),
             RequirementAssessment(requirement='REST APIs', importance=Importance.required,
                                   status=EvidenceStatus.clearly_demonstrated,
-                                  evidence='Experience describes designing and maintaining REST services.'),
+                                  evidence='Your experience describes designing and maintaining REST services.'),
             RequirementAssessment(requirement='MongoDB', importance=Importance.required,
                                   status=EvidenceStatus.clearly_demonstrated,
-                                  evidence='Skills and a project both reference MongoDB.'),
+                                  evidence='Your skills and a project both reference MongoDB.'),
             RequirementAssessment(requirement='Docker', importance=Importance.preferred,
                                   status=EvidenceStatus.not_mentioned,
-                                  evidence='Not mentioned in the CV.'),
+                                  evidence='Not shown in your CV.'),
             RequirementAssessment(requirement='CI/CD', importance=Importance.preferred,
                                   status=EvidenceStatus.uncertain,
-                                  evidence='Tests are mentioned, but no explicit CI/CD pipeline experience.'),
+                                  evidence='Your CV mentions tests, but CI/CD pipeline experience is not clear from it.'),
         ],
-        strengths=['Python REST API development', 'MongoDB data modelling'],
-        areas_to_improve=['Add containerisation (Docker) if you have used it', 'Clarify any CI/CD exposure'],
+        strengths=['Your Python REST API development', 'Your MongoDB data modelling'],
+        areas_to_improve=['Add containerisation (Docker) if you have used it', 'Make any CI/CD exposure clear if you have it'],
         recommendations=[
-            'Lead your summary with "Backend engineer" and name Python, REST and MongoDB explicitly.',
-            'Quantify one API project (traffic, latency, or data size) to strengthen the evidence.',
+            'Lead your summary with "Backend engineer" and name Python, REST and MongoDB explicitly, as your experience already shows.',
+            'Quantify one of your API projects (traffic, latency, or data size) to strengthen the evidence.',
         ],
         suggested_wording=[
             SuggestedWording(section='summary',
