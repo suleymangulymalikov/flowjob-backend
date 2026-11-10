@@ -17,6 +17,7 @@ class TailorDraft(Document):
     match_id: str | None = None
     job_title: str
     company: str | None = None
+    job_url: str | None = None
 
     cv_hash: str
     job_hash: str

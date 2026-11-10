@@ -49,6 +49,7 @@ class CreateTailor(BaseModel):
     jobTitle: str | None = Field(default=None, max_length=200)
     jobDescription: str | None = None
     company: str | None = Field(default=None, max_length=200)
+    jobUrl: str | None = Field(default=None, max_length=2048)
     fresh: bool = False
 
 
@@ -59,6 +60,7 @@ class TailorDraftResponse(BaseModel):
     matchId: str | None
     jobTitle: str
     company: str
+    jobUrl: str | None = None
     suggestions: list[dict[str, Any]]
     missingQualifications: list[str]
     questions: list[str]

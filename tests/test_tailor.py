@@ -58,7 +58,7 @@ def mock_ai(monkeypatch):
     def fake(job_title, company, job_context, cv_sections, _analysis=None):
         state['calls'] += 1
         state['last_sections'] = cv_sections
-        return TailoringResult(analysis=_analysis or tailoring(), usage=Usage(600, 300), model=settings.openai_model)
+        return TailoringResult(analysis=_analysis or tailoring(), usage=Usage(600, 300), model='mock')
 
     monkeypatch.setattr(ai_tailoring, 'analyze', fake)
     return state
@@ -136,7 +136,7 @@ def test_invalid_proposals_are_discarded_without_losing_valid_changes(client, mo
         tailoring().changes[0],
     ])
     monkeypatch.setattr(ai_tailoring, 'analyze',
-                        lambda *a: TailoringResult(analysis=proposals, usage=Usage(1, 1), model=settings.openai_model))
+                        lambda *a: TailoringResult(analysis=proposals, usage=Usage(1, 1), model='mock'))
     h = signup(client)
     cv = make_cv(client, h)
     r = tailor(client, h, cv)
@@ -159,7 +159,7 @@ def test_exact_source_does_not_auto_approve_new_claims(client, monkeypatch, sugg
                        explanation='Sort existing skills.', review_required=False),
     ])
     monkeypatch.setattr(ai_tailoring, 'analyze',
-                        lambda *a: TailoringResult(analysis=analysis, usage=Usage(1, 1), model=settings.openai_model))
+                        lambda *a: TailoringResult(analysis=analysis, usage=Usage(1, 1), model='mock'))
     h = signup(client)
     result = tailor(client, h, make_cv(client, h)).json()
     assert [s['reviewRequired'] for s in result['suggestions']] == [True, False]
@@ -267,9 +267,9 @@ def test_match_reuse_path(client, monkeypatch):
                               status=EvidenceStatus.clearly_demonstrated, evidence='Built APIs'),
     ])
     monkeypatch.setattr(ai_matching, 'analyze',
-                        lambda *a, **k: AnalysisResult(analysis=match_analysis, usage=Usage(10, 10), model=settings.openai_model))
+                        lambda *a, **k: AnalysisResult(analysis=match_analysis, usage=Usage(10, 10), model='mock'))
     monkeypatch.setattr(ai_tailoring, 'analyze',
-                        lambda *a, **k: TailoringResult(analysis=tailoring(), usage=Usage(5, 5), model=settings.openai_model))
+                        lambda *a, **k: TailoringResult(analysis=tailoring(), usage=Usage(5, 5), model='mock'))
     h = signup(client)
     cv = make_cv(client, h)
     mid = client.post(f'{BASE}/matches', headers=h,
@@ -426,3 +426,87 @@ def test_explicit_fresh_request_bypasses_verified_cache(client, mock_ai):
     fresh = tailor(client, h, cv, fresh=True).json()
     assert fresh['id'] != first['id'] and fresh['sourceCvRevision'] == first['sourceCvRevision']
     assert mock_ai['calls'] == 2
+
+
+def test_verified_draft_with_old_job_fingerprint_remains_readable_but_is_not_reused(client, mock_ai):
+    from hashlib import sha256
+
+    h = signup(client)
+    cv = make_cv(client, h)
+    draft = tailor(client, h, cv).json()
+    old_job_hash = sha256(f'backend engineer\n{JOB}'.encode()).hexdigest()
+
+    async def use_legacy_key():
+        await TailorDraft.get_pymongo_collection().update_one(
+            {'_id': PydanticObjectId(draft['id'])}, {'$set': {'job_hash': old_job_hash}},
+        )
+
+    client.portal.call(use_legacy_key)
+    original = client.get(f'{BASE}/tailor/{draft["id"]}', headers=h).json()
+    assert original['sourceCvRevision'] == draft['sourceCvRevision']
+    replacement = tailor(client, h, cv).json()
+    assert replacement['id'] != draft['id'] and mock_ai['calls'] == 2
+    assert client.get(f'{BASE}/tailor/{draft["id"]}', headers=h).json() == original
+
+
+def test_job_url_separates_direct_drafts_and_is_preserved_on_retrieval(client, mock_ai):
+    h = signup(client)
+    cv = make_cv(client, h)
+    old = tailor(client, h, cv, jobUrl='https://example.com/jobs/1').json()
+    url = 'https://example.com/jobs/2'
+    new = tailor(client, h, cv, jobUrl=url).json()
+    assert new['id'] != old['id'] and new['jobUrl'] == url
+    assert tailor(client, h, cv, jobUrl=url).json()['id'] == new['id']
+    assert client.get(f'{BASE}/tailor/{new["id"]}', headers=h).json()['jobUrl'] == url
+    assert mock_ai['calls'] == 2
+
+
+def test_tailoring_keeps_direct_drafts_and_each_match_identity_separate(client, mock_ai):
+    from app.tailor.router import job_context_from_match
+
+    h = signup(client)
+    cv = make_cv(client, h)
+    job_title = 'Backend Engineer'
+    company = 'Example'
+    url = 'https://example.com/jobs/1'
+    body = {'cvId': cv, 'jobTitle': job_title, 'jobDescription': JOB, 'company': company, 'jobUrl': url}
+    first = client.post(f'{BASE}/matches', headers=h, json=body).json()
+    other_job = {**body, 'jobDescription': JOB + ' Second posting for a separate team.'}
+    second = client.post(f'{BASE}/matches', headers=h, json=other_job).json()
+    assert first['id'] != second['id']
+
+    # The built-in matching mock returns the same analysis for both jobs. Also give
+    # direct tailoring the identical text, so the identity must come from the match ID.
+    context = job_context_from_match(first)
+    assert context == job_context_from_match(second)
+    direct = tailor(client, h, cv, company=company, jobUrl=url, jobDescription=context).json()
+    linked = []
+    for match in (first, second):
+        request = {'matchId': match['id']}
+        response = client.post(f'{BASE}/tailor', headers=h, json=request)
+        assert response.status_code == 201
+        draft = response.json()
+        assert (draft['sourceCvId'], draft['matchId'], draft['jobUrl']) == (cv, match['id'], url)
+        assert client.post(f'{BASE}/tailor', headers=h, json=request).json()['id'] == draft['id']
+        linked.append(draft['id'])
+    assert direct['matchId'] is None and len({direct['id'], *linked}) == 3
+    assert mock_ai['calls'] == 3
+
+    other = signup(client, 'other@example.com')
+    other_cv = make_cv(client, other)
+    other_draft = tailor(client, other, other_cv, company=company, jobUrl=url, jobDescription=context).json()
+    assert other_draft['id'] != direct['id'] and other_draft['sourceCvId'] == other_cv
+    assert client.post(f'{BASE}/tailor', headers=other, json={'matchId': first['id']}).status_code == 404
+    assert mock_ai['calls'] == 4
+
+    first_url = f'{BASE}/matches/{first["id"]}'
+    assert client.delete(first_url, headers=h).status_code == 204
+    assert client.post(f'{BASE}/tailor', headers=h, json={'matchId': first['id']}).status_code == 404
+    assert client.get(f'{BASE}/tailor/{linked[0]}', headers=h).status_code == 200
+    assert tailor(client, h, cv, company=company, jobUrl=url, jobDescription=context).json()['id'] == direct['id']
+
+    assert client.delete(f'{BASE}/cvs/{cv}', headers=h).status_code == 204
+    assert client.post(f'{BASE}/tailor', headers=h, json={'matchId': second['id']}).status_code == 404
+    assert tailor(client, h, cv, company=company, jobUrl=url, jobDescription=context).status_code == 404
+    assert client.get(f'{BASE}/tailor/{linked[1]}', headers=h).status_code == 200
+    assert mock_ai['calls'] == 4

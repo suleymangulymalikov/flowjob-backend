@@ -20,11 +20,11 @@ from app.auth.models import RefreshToken
 from app.auth.router import issue_tokens
 from app.auth.security import hash_password, hash_refresh_token, verify_password
 from app.config import settings
+from app.cv.revision import content_revision
 from app.integration.models import SavedCv
 from app.profiles.models import Profile
 from app.profiles.schemas import Education, Experience, Personal, Project
 from app.tailor.drafts import require_current_draft
-from app.tailor.grounding import content_revision
 from app.users.models import User
 
 router = APIRouter(prefix='/api/v1', tags=['frontend'])

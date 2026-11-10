@@ -22,6 +22,7 @@ class MatchRecord(Document):
 
     # Cache key parts (hashes, not raw content).
     cv_hash: str
+    cv_revision: str | None = None  # absent on historical reports
     job_hash: str
     model: str
     prompt_version: str

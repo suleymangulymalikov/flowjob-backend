@@ -1,7 +1,13 @@
 """AI job-matching API tests. OpenAI is always mocked — no key, no network, no charges."""
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
 import pytest
+from beanie import PydanticObjectId
 
 from app.config import settings
+from app.matches import router as matches_router
+from app.matches.models import MatchRecord
 from app.matches.schemas import (
     AiAnalysis,
     EvidenceStatus,
@@ -9,8 +15,9 @@ from app.matches.schemas import (
     RequirementAssessment,
     SuggestedWording,
 )
-from app.services import ai_matching
+from app.services import ai_matching, ai_tailoring
 from app.services.ai_matching import AnalysisResult, Usage
+from app.tailor import router as tailor_router
 
 BASE = '/api/v1'
 JOB = (
@@ -68,7 +75,7 @@ def mock_ai(monkeypatch):
         state['last_evidence'] = cv_evidence
         state['last_job_title'] = job_title
         return AnalysisResult(analysis=(_result or analysis()), usage=Usage(input_tokens=400, output_tokens=200),
-                              model=settings.openai_model)
+                              model='mock')
 
     monkeypatch.setattr(ai_matching, 'analyze', fake)
     return state
@@ -119,7 +126,7 @@ def test_valid_analysis_and_score(client, mock_ai):
     assert any(x['requirement'] == 'Python' for x in m['matched'])
     assert any(x['requirement'] == 'Docker' for x in m['missing'])
     assert m['recommendations'] and m['questions']
-    assert m['model'] == settings.openai_model and m['analysisVersion']
+    assert m['model'] == 'mock' and m['analysisVersion']
     assert m['tokens'] == {'input': 400, 'output': 200} and m['estimatedCostUsd'] > 0
 
 
@@ -135,7 +142,7 @@ def test_pii_minimized_in_evidence(client, mock_ai):
 
 def test_insufficient_info_returns_unavailable_score(client, monkeypatch):
     monkeypatch.setattr(ai_matching, 'analyze', lambda *a, **k: AnalysisResult(
-        analysis=analysis(enough=False, reqs=[]), usage=Usage(10, 10), model=settings.openai_model))
+        analysis=analysis(enough=False, reqs=[]), usage=Usage(10, 10), model='mock'))
     h = signup(client)
     cv = make_cv(client, h)
     m = client.post(f'{BASE}/matches', headers=h, json={'cvId': cv, 'jobTitle': 'Dev', 'jobDescription': JOB}).json()
@@ -183,6 +190,132 @@ def test_identical_request_is_deduplicated(client, mock_ai):
     assert mock_ai['calls'] == 1  # OpenAI called only once
 
 
+def test_identical_cv_evidence_cannot_reuse_a_different_cvs_match(client, mock_ai):
+    h = signup(client)
+    cv_a = make_cv(client, h, 'CV A')
+    cv_b = make_cv(client, h, 'CV B')
+    body = {'jobTitle': 'Backend Engineer', 'jobDescription': JOB}
+    endpoint = f'{BASE}/matches'
+    first = client.post(endpoint, headers=h, json={**body, 'cvId': cv_a}).json()
+    evidence = mock_ai['last_evidence']
+    second = client.post(endpoint, headers=h, json={**body, 'cvId': cv_b}).json()
+
+    assert mock_ai['last_evidence'] == evidence
+    assert (first['cvId'], first['cvName']) == (cv_a, 'CV A')
+    assert (second['cvId'], second['cvName']) == (cv_b, 'CV B')
+    assert first['id'] != second['id'] and mock_ai['calls'] == 2
+    assert client.post(endpoint, headers=h, json={**body, 'cvId': cv_a}).json()['id'] == first['id']
+    assert mock_ai['calls'] == 2
+
+
+@pytest.mark.parametrize('field,value', [
+    ('jobTitle', 'backend engineer'),
+    ('jobDescription', JOB + ' The job also includes system design.'),
+    ('company', 'New Company'),
+    ('jobUrl', 'https://example.com/jobs/2'),
+])
+def test_job_metadata_changes_prevent_reuse(client, mock_ai, field, value):
+    h = signup(client)
+    body = {'cvId': make_cv(client, h), 'jobTitle': 'Backend Engineer',
+            'jobDescription': JOB, 'company': 'Example', 'jobUrl': 'https://example.com/jobs/1'}
+    endpoint = f'{BASE}/matches'
+    first = client.post(endpoint, headers=h, json=body).json()
+    changed = {**body, field: value}
+    second = client.post(endpoint, headers=h, json=changed).json()
+
+    assert second['id'] != first['id']
+    assert all(second[k] == changed[k] for k in ('jobTitle', 'company', 'jobUrl', 'cvId'))
+    assert client.post(endpoint, headers=h, json=changed).json()['id'] == second['id']
+    assert mock_ai['calls'] == 2
+
+
+def test_cv_revision_invalidates_match_even_with_unchanged_evidence(client, mock_ai):
+    h = signup(client)
+    cv = make_cv(client, h)
+    body = {'cvId': cv, 'jobTitle': 'Dev', 'jobDescription': JOB}
+    endpoint = f'{BASE}/matches'
+    first = client.post(endpoint, headers=h, json=body).json()
+    evidence = mock_ai['last_evidence']
+    source_url = f'{BASE}/cvs/{cv}'
+    content = client.get(source_url, headers=h).json()['content']
+    assert client.put(source_url, headers=h, json={'content': {**content, 'location': 'Warsaw'}}).status_code == 200
+    edited = client.post(endpoint, headers=h, json=body).json()
+    assert edited['id'] != first['id'] and mock_ai['last_evidence'] == evidence
+    assert client.post(endpoint, headers=h, json=body).json()['id'] == edited['id']
+
+    assert client.delete(source_url, headers=h).status_code == 204
+    assert client.post(endpoint, headers=h, json=body).status_code == 422
+    assert client.get(f'{endpoint}/{first["id"]}', headers=h).status_code == 200
+    assert mock_ai['calls'] == 2
+
+
+def test_historical_match_without_revision_remains_readable_but_is_not_reused(client, mock_ai):
+    h = signup(client)
+    body = {'cvId': make_cv(client, h), 'jobTitle': 'Dev', 'jobDescription': JOB}
+    endpoint = f'{BASE}/matches'
+    first = client.post(endpoint, headers=h, json=body).json()
+
+    async def make_legacy():
+        await MatchRecord.get_pymongo_collection().update_one(
+            {'_id': PydanticObjectId(first['id'])}, {'$unset': {'cv_revision': ''}},
+        )
+
+    client.portal.call(make_legacy)
+    historical = client.get(f'{endpoint}/{first["id"]}', headers=h).json()
+    second = client.post(endpoint, headers=h, json=body).json()
+    assert second['id'] != first['id'] and mock_ai['calls'] == 2
+    assert client.get(f'{endpoint}/{first["id"]}', headers=h).json() == historical
+
+
+@pytest.mark.parametrize('path,router_module,provider', [
+    ('matches', matches_router, ai_matching),
+    ('tailor', tailor_router, ai_tailoring),
+])
+def test_concurrent_identical_requests_share_one_generation(client, monkeypatch, path, router_module, provider):
+    h = signup(client)
+    body = {'cvId': make_cv(client, h), 'jobTitle': 'Dev', 'jobDescription': JOB}
+    provider_started = Event()
+    second_lookup = Event()
+    finish_provider = Event()
+    original_analyze = provider.analyze  # The test launcher forces the built-in mock.
+    original_lock = router_module.cache_lock
+    calls = 0
+    lock_requests = 0
+
+    def analyze(*args):
+        nonlocal calls
+        calls += 1
+        provider_started.set()
+        assert finish_provider.wait(10)
+        return original_analyze(*args)
+
+    def observe_lock(*identity):
+        nonlocal lock_requests
+        lock_requests += 1
+        if lock_requests == 2:
+            second_lookup.set()
+        return original_lock(*identity)
+
+    def post():
+        return client.post(f'{BASE}/{path}', headers=h, json=body)
+
+    monkeypatch.setattr(provider, 'analyze', analyze)
+    monkeypatch.setattr(router_module, 'cache_lock', observe_lock)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        try:
+            first = executor.submit(post)
+            assert provider_started.wait(5)
+            second = executor.submit(post)
+            assert second_lookup.wait(5)
+        finally:
+            finish_provider.set()
+        r1, r2 = first.result(timeout=5), second.result(timeout=5)
+
+    assert r1.status_code == r2.status_code == 201
+    assert r1.json()['id'] == r2.json()['id']
+    assert calls == 1
+
+
 def test_cache_does_not_leak_between_users(client, mock_ai):
     ana = signup(client, 'ana@example.com')
     ana_cv = make_cv(client, ana)
@@ -215,7 +348,7 @@ def test_failed_analysis_does_not_consume_quota(client, monkeypatch):
         calls['n'] += 1
         if calls['n'] == 1:
             raise ai_matching.AiTimeout('x')
-        return AnalysisResult(analysis=analysis(), usage=Usage(1, 1), model=settings.openai_model)
+        return AnalysisResult(analysis=analysis(), usage=Usage(1, 1), model='mock')
 
     monkeypatch.setattr(ai_matching, 'analyze', flaky)
     h = signup(client)

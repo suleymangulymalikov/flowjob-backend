@@ -4,8 +4,8 @@ from beanie import PydanticObjectId
 from bson.errors import InvalidId
 from fastapi import HTTPException
 
+from app.cv.revision import content_revision
 from app.integration.models import SavedCv
-from app.tailor.grounding import content_revision
 from app.tailor.models import TailorDraft
 from app.users.models import User
 

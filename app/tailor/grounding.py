@@ -1,16 +1,8 @@
 """Bind provider proposals to specific text in an immutable source revision."""
 
-import hashlib
-import json
 from typing import Any
 
 from app.tailor.schemas import ChangeSection, ProposedChange
-
-
-def content_revision(content: dict[str, Any]) -> str:
-    # Object key order isn't meaningful. Array order (in particular, bullet positions) is.
-    canonical = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
-    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
 def _item(items: Any, item_id: str) -> dict | None:

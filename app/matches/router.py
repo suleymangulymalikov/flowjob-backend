@@ -11,6 +11,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
 from app.config import settings
+from app.cv.revision import content_revision
 from app.integration.models import SavedCv
 from app.matches.models import MatchRecord, MatchUsage
 from app.matches.schemas import (
@@ -22,6 +23,7 @@ from app.matches.schemas import (
 )
 from app.matches.scoring import compute_score, explain, verdict_for
 from app.services import ai_matching
+from app.services.ai_cache import cache_lock, cache_model, job_fingerprint
 from app.users.models import User
 
 router = APIRouter(prefix='/api/v1', tags=['matches'])
@@ -157,7 +159,7 @@ async def owned_cv(cv_id: str, user: User) -> SavedCv:
         oid = PydanticObjectId(cv_id)
     except (ValueError, TypeError, InvalidId):
         raise HTTPException(422, 'Choose a CV to compare.')
-    cv = await SavedCv.find_one(SavedCv.id == oid, SavedCv.user_id == user.id)
+    cv = await SavedCv.find_one(SavedCv.id == oid, SavedCv.user_id == user.id, ignore_cache=True)
     if not cv:
         raise HTTPException(422, 'Choose a CV to compare.')
     return cv
@@ -183,54 +185,62 @@ async def create_match(data: CreateMatch, user: CurrentUser):
     cv = await owned_cv(data.cvId, user)
     evidence = cv_evidence(cv.content)
     cv_hash = _sha(evidence)
-    job_hash = _sha(f'{data.jobTitle.strip().lower()}\n{job}')
+    revision = content_revision(cv.content)
+    job_title = data.jobTitle.strip()
+    job_hash = job_fingerprint(job_title, data.company, data.jobUrl, job)
+    model = cache_model()
 
-    # Look up reusable analyses in MongoDB so a deleted report cannot be reused.
-    cutoff = datetime.now(UTC) - timedelta(hours=settings.match_cache_ttl_hours)
-    cached = await MatchRecord.find(
-        MatchRecord.user_id == user.id,
-        MatchRecord.cv_hash == cv_hash,
-        MatchRecord.job_hash == job_hash,
-        MatchRecord.model == settings.openai_model,
-        MatchRecord.prompt_version == PROMPT_VERSION,
-        MatchRecord.created_at > cutoff,
-        ignore_cache=True,
-    ).sort('-created_at').first_or_none()
-    if cached:
-        return present(cached)
+    async with cache_lock('match', user.id, cv.id, cv.name, revision, job_hash, model, PROMPT_VERSION):
+        # Look up reusable analyses in MongoDB so a deleted report cannot be reused.
+        cutoff = datetime.now(UTC) - timedelta(hours=settings.match_cache_ttl_hours)
+        cached = await MatchRecord.find(
+            MatchRecord.user_id == user.id,
+            MatchRecord.cv_id == cv.id,
+            MatchRecord.cv_name == cv.name,
+            MatchRecord.cv_revision == revision,
+            MatchRecord.cv_hash == cv_hash,
+            MatchRecord.job_hash == job_hash,
+            MatchRecord.model == model,
+            MatchRecord.prompt_version == PROMPT_VERSION,
+            MatchRecord.created_at > cutoff,
+            ignore_cache=True,
+        ).sort('-created_at').first_or_none()
+        if cached:
+            return present(cached)
 
-    await reserve_quota(user.id)
-    try:
-        # Billable call runs off the event loop. Tests monkeypatch ai_matching.analyze.
-        out = await run_in_threadpool(
-            ai_matching.analyze, data.jobTitle.strip(), data.company, job, evidence
+        await reserve_quota(user.id)
+        try:
+            # Billable call runs off the event loop. Tests monkeypatch ai_matching.analyze.
+            out = await run_in_threadpool(
+                ai_matching.analyze, job_title, data.company, job, evidence
+            )
+        except ai_matching.AiError as e:
+            await release_quota(user.id)  # a failed analysis should not consume the user's quota
+            status, message = _ERROR_STATUS.get(type(e), (502, 'The AI service is unavailable.'))
+            raise HTTPException(status, message)
+
+        score = compute_score(out.analysis)
+        result = build_result(out.analysis, score, out.model)
+        record = MatchRecord(
+            user_id=user.id,
+            cv_id=cv.id,
+            cv_name=cv.name,
+            job_title=job_title,
+            company=data.company,
+            job_url=data.jobUrl,
+            cv_hash=cv_hash,
+            cv_revision=revision,
+            job_hash=job_hash,
+            model=out.model,
+            prompt_version=out.prompt_version,
+            result=result,
+            score=score,
+            input_tokens=out.usage.input_tokens,
+            output_tokens=out.usage.output_tokens,
+            estimated_cost_usd=ai_matching.estimate_cost_usd(out.usage),
         )
-    except ai_matching.AiError as e:
-        await release_quota(user.id)  # a failed analysis should not consume the user's quota
-        status, message = _ERROR_STATUS.get(type(e), (502, 'The AI service is unavailable.'))
-        raise HTTPException(status, message)
-
-    score = compute_score(out.analysis)
-    result = build_result(out.analysis, score, out.model)
-    record = MatchRecord(
-        user_id=user.id,
-        cv_id=cv.id,
-        cv_name=cv.name,
-        job_title=data.jobTitle.strip(),
-        company=data.company,
-        job_url=data.jobUrl,
-        cv_hash=cv_hash,
-        job_hash=job_hash,
-        model=out.model,
-        prompt_version=out.prompt_version,
-        result=result,
-        score=score,
-        input_tokens=out.usage.input_tokens,
-        output_tokens=out.usage.output_tokens,
-        estimated_cost_usd=ai_matching.estimate_cost_usd(out.usage),
-    )
-    await record.insert()
-    return present(record)
+        await record.insert()
+        return present(record)
 
 
 @router.get('/matches')
