@@ -5,27 +5,37 @@ NOT stubbed: they return 404 until implemented, rather than fake success.
 """
 import re
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
-from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, EmailStr, Field
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, EmailStr, Field, ValidationError
 from pymongo.errors import DuplicateKeyError
 
 from app.auth.dependencies import get_current_user
-from app.cv.render import render_saved_cv_pdf
+from app.auth.inputs import AccountName, AuthPayloadRoute, ExistingPassword, LoginPassword, NewPassword
+from app.auth.limits import throttle
 from app.auth.models import RefreshToken
-from app.auth.router import issue_tokens
-from app.auth.security import hash_password, hash_refresh_token, verify_password
+from app.auth.security import hash_password, verify_password
+from app.auth.sessions import authenticate, consume_refresh_token, issue_tokens, revoke_refresh_token
 from app.config import settings
+from app.cv.content import (
+    CvContent, CvCreateInput, CvPreviewInput, CvWriteInput,
+    has_new_unsafe_links, read_cv_content, unsafe_contact_link,
+)
+from app.cv.http import CvPayloadRoute, checked_saved_content, render_pdf
+from app.cv.render import render_saved_cv_pdf
+from app.cv.revision import content_revision
 from app.integration.models import SavedCv
 from app.profiles.models import Profile
 from app.profiles.schemas import Education, Experience, Personal, Project
+from app.tailor.drafts import require_current_draft
 from app.users.models import User
 
 router = APIRouter(prefix='/api/v1', tags=['frontend'])
+cv_payload_router = APIRouter(route_class=CvPayloadRoute)
+auth_payload_router = APIRouter(route_class=AuthPayloadRoute)
 CurrentUser = Annotated[User, Depends(get_current_user)]
 COOKIE = 'flowjob_refresh'
 
@@ -34,73 +44,68 @@ def present_user(user: User) -> dict[str, str]:
     return {'id': str(user.id), 'name': user.full_name, 'email': user.email, 'createdAt': user.created_at.isoformat()}
 
 
-def attach_cookie(response: Response, refresh_token: str) -> None:
+def secure_cookie(request: Request) -> bool:
+    return settings.cookie_secure or request.url.scheme == 'https'
+
+
+async def session(user: User, request: Request, response: Response) -> dict[str, Any]:
+    tokens = await issue_tokens(user.id)
     response.set_cookie(
-        COOKIE, refresh_token, httponly=True, secure=settings.cookie_secure,
+        COOKIE, tokens.refresh_token, httponly=True, secure=secure_cookie(request),
         samesite='lax', path='/api/v1/auth',
         max_age=settings.refresh_token_expire_days * 86400,
     )
-
-
-async def session(user: User, response: Response) -> dict[str, Any]:
-    tokens = await issue_tokens(user.id)
-    attach_cookie(response, tokens.refresh_token)
     return {'accessToken': tokens.access_token, 'user': present_user(user)}
 
 
 class LoginData(BaseModel):
     email: EmailStr
-    password: str
+    password: LoginPassword
 
 
-class RegisterData(LoginData):
-    name: str = Field(min_length=1)
+class RegisterData(BaseModel):
+    email: EmailStr
+    password: NewPassword
+    name: AccountName
 
 
-@router.post('/auth/register', status_code=201)
-async def register(data: RegisterData, response: Response):
-    user = User(email=data.email.lower(), full_name=data.name, hashed_password=hash_password(data.password))
-    if len(data.password) < 8:
-        raise HTTPException(422, 'Password must contain at least 8 characters')
+@auth_payload_router.post('/auth/register', status_code=201)
+async def register(data: RegisterData, request: Request, response: Response):
+    await throttle(request, 'register')
+    user = User(email=data.email.lower(), full_name=data.name, hashed_password=await hash_password(data.password))
     try:
         await user.insert()
     except DuplicateKeyError:
-        raise HTTPException(409, 'Email already registered')
-    return await session(user, response)
+        raise HTTPException(409, 'Email already registered') from None
+    return await session(user, request, response)
 
 
-@router.post('/auth/login')
-async def login(data: LoginData, response: Response):
-    user = await User.find_one(User.email == data.email.lower())
-    if not user or not verify_password(data.password, user.hashed_password):
+@auth_payload_router.post('/auth/login')
+async def login(data: LoginData, request: Request, response: Response):
+    email = data.email.lower()
+    await throttle(request, 'login', email)
+    user = await authenticate(email, data.password)
+    if user is None:
         raise HTTPException(401, 'Incorrect email or password')
-    return await session(user, response)
+    return await session(user, request, response)
 
 
-@router.post('/auth/refresh')
-async def refresh(response: Response, flowjob_refresh: Annotated[str | None, Cookie()] = None):
+@auth_payload_router.post('/auth/refresh')
+async def refresh(request: Request, response: Response, flowjob_refresh: Annotated[str | None, Cookie()] = None):
     if not flowjob_refresh:
         raise HTTPException(401, 'Missing session')
-    stored = await RefreshToken.find_one(
-        RefreshToken.token_hash == hash_refresh_token(flowjob_refresh),
-        RefreshToken.expires_at > datetime.now(UTC),
-    )
-    if stored is None or (await stored.delete()).deleted_count == 0:
-        response.delete_cookie(COOKIE, path='/api/v1/auth')
-        raise HTTPException(401, 'Invalid session')
-    user = await User.get(stored.user_id)
+    user = await consume_refresh_token(flowjob_refresh)
     if user is None:
-        raise HTTPException(401, 'User no longer exists')
-    return await session(user, response)
+        # A concurrent winning refresh may already have replaced the cookie.
+        raise HTTPException(401, 'Invalid session')
+    return await session(user, request, response)
 
 
-@router.post('/auth/logout', status_code=204)
-async def logout(response: Response, flowjob_refresh: Annotated[str | None, Cookie()] = None):
+@auth_payload_router.post('/auth/logout', status_code=204)
+async def logout(request: Request, response: Response, flowjob_refresh: Annotated[str | None, Cookie()] = None):
     if flowjob_refresh:
-        stored = await RefreshToken.find_one(RefreshToken.token_hash == hash_refresh_token(flowjob_refresh))
-        if stored:
-            await stored.delete()
-    response.delete_cookie(COOKIE, path='/api/v1/auth')
+        await revoke_refresh_token(flowjob_refresh)
+    response.delete_cookie(COOKIE, path='/api/v1/auth', httponly=True, secure=secure_cookie(request), samesite='lax')
 
 
 def blank_profile(user: User) -> dict[str, Any]:
@@ -183,22 +188,12 @@ async def save_profile(data: UIProfile, user: CurrentUser):
 
 def present_cv(cv: SavedCv) -> dict[str, Any]:
     data: dict[str, Any] = {'id': str(cv.id), 'name': cv.name, 'kind': cv.kind,
-        'createdAt': cv.created_at.isoformat(), 'updatedAt': cv.updated_at.isoformat(), 'content': cv.content}
+        'createdAt': cv.created_at.isoformat(), 'updatedAt': cv.updated_at.isoformat(), 'content': read_cv_content(cv.content)}
     if cv.job_title: data['jobTitle'] = cv.job_title
     if cv.company: data['company'] = cv.company
     if cv.match_id: data['matchId'] = cv.match_id
     if cv.source_cv_id: data['sourceCvId'] = cv.source_cv_id
     return data
-
-
-class CVInput(BaseModel):
-    name: str | None = None
-    kind: Literal['original', 'tailored'] | None = None
-    jobTitle: str | None = None
-    company: str | None = None
-    matchId: str | None = None
-    sourceCvId: str | None = None
-    content: dict[str, Any] | None = None
 
 
 async def owned_cv(cv_id: str, user: User) -> SavedCv:
@@ -217,9 +212,34 @@ async def cvs(user: CurrentUser):
     return [present_cv(c) for c in await SavedCv.find(SavedCv.user_id == user.id).to_list()]
 
 
-@router.post('/cvs', status_code=201)
-async def create_cv(data: CVInput, user: CurrentUser):
-    content = data.content or (await read_profile(user))
+def reject_new_unsafe_links(content: CvContent, inherited: dict | None = None) -> None:
+    original_links = inherited.get('links') if inherited else None
+    if has_new_unsafe_links(content.links, original_links):
+        raise HTTPException(422, 'Contact links cannot use unsafe URL schemes or include credentials.')
+
+
+@cv_payload_router.post('/cvs', status_code=201)
+async def create_cv(data: CvCreateInput, user: CurrentUser):
+    source_content = None
+    if data.tailorDraftId is not None:
+        draft, source = await require_current_draft(data.tailorDraftId, user)
+        if data.kind != 'tailored' or data.sourceCvId != str(draft.source_cv_id):
+            raise HTTPException(422, 'The tailored CV must use the source CV of the draft.')
+        if data.content is None or not data.content.model_fields_set:
+            raise HTTPException(422, 'Provide the reviewed CV content.')
+        source_content = source.content
+    if data.content is not None and data.content.model_fields_set:
+        reject_new_unsafe_links(data.content, source_content)
+        content = data.content.model_dump(exclude_unset=True)
+    else:
+        # The browser omits content when creating a CV from the profile.
+        # Validate the snapshot before creating a new record.
+        try:
+            snapshot = CvContent.model_validate(await read_profile(user))
+        except ValidationError:
+            raise HTTPException(422, 'Your profile exceeds the supported CV limits or contains invalid text. Edit it and try again.') from None
+        reject_new_unsafe_links(snapshot)
+        content = snapshot.model_dump(exclude_unset=True)
     cv = SavedCv(user_id=user.id, name=data.name or 'Original CV', kind=data.kind or 'original',
                  job_title=data.jobTitle, company=data.company, match_id=data.matchId,
                  source_cv_id=data.sourceCvId, content=content)
@@ -229,18 +249,26 @@ async def create_cv(data: CVInput, user: CurrentUser):
 
 @router.get('/cvs/{cv_id}')
 async def get_cv(cv_id: str, user: CurrentUser):
-    return present_cv(await owned_cv(cv_id, user))
-
-
-@router.put('/cvs/{cv_id}')
-async def update_cv(cv_id: str, data: CVInput, user: CurrentUser):
     cv = await owned_cv(cv_id, user)
-    for attr, value in [('name', data.name), ('kind', data.kind), ('job_title', data.jobTitle),
-                        ('company', data.company), ('match_id', data.matchId), ('content', data.content)]:
-        if value is not None:
-            setattr(cv, attr, value)
-    cv.updated_at = datetime.now(UTC)
-    await cv.save()
+    return {**present_cv(cv), 'contentRevision': content_revision(cv.content)}
+
+
+@cv_payload_router.put('/cvs/{cv_id}')
+async def update_cv(cv_id: str, data: CvWriteInput, user: CurrentUser):
+    cv = await owned_cv(cv_id, user)
+    fields = {
+        attr: value for attr, value in [
+            ('name', data.name), ('kind', data.kind), ('job_title', data.jobTitle),
+            ('company', data.company), ('match_id', data.matchId),
+        ] if value is not None
+    }
+    if data.content is not None:
+        reject_new_unsafe_links(data.content, cv.content)
+        submitted = data.content.model_dump(exclude_unset=True)
+        if read_cv_content(submitted) != read_cv_content(cv.content):
+            fields['content'] = submitted
+    fields['updated_at'] = datetime.now(UTC)
+    await cv.update({'$set': fields})
     return present_cv(cv)
 
 
@@ -258,11 +286,10 @@ async def saved_cv_pdf(cv_id: str, user: CurrentUser) -> Response:
     backs both the browser preview and the download.
     """
     cv = await owned_cv(cv_id, user)
-    content = cv.content or {}
-    name = str(content.get('fullName') or user.full_name)
-    email = str(content.get('email') or user.email)
-    # PDF rendering is CPU-bound, so run it off the event loop.
-    pdf = await run_in_threadpool(render_saved_cv_pdf, name, email, content)
+    content = checked_saved_content(cv.content)
+    name = content['fullName'] or user.full_name
+    email = content['email'] or user.email
+    pdf = await render_pdf(render_saved_cv_pdf, name, email, content)
     safe = re.sub(r'[^A-Za-z0-9._-]+', '_', cv.name).strip('_') or 'CV'
     return Response(
         pdf,
@@ -271,36 +298,37 @@ async def saved_cv_pdf(cv_id: str, user: CurrentUser) -> Response:
     )
 
 
-class PreviewInput(BaseModel):
-    content: dict[str, Any] = Field(default_factory=dict)
-
-
-@router.post('/cvs/preview/pdf', response_class=Response,
-             responses={200: {'content': {'application/pdf': {}}}})
-async def preview_cv_pdf(data: PreviewInput, user: CurrentUser) -> Response:
-    """Render arbitrary (unsaved) CV content for the live builder preview.
-
-    Stateless: uses the same Harvard renderer as saved previews and downloads, and
-    never reads or writes any MongoDB record (only the authenticated user is needed).
-    """
-    content = data.content or {}
-    name = str(content.get('fullName') or user.full_name)
-    email = str(content.get('email') or user.email)
-    pdf = await run_in_threadpool(render_saved_cv_pdf, name, email, content)
+@cv_payload_router.post('/cvs/preview/pdf', response_class=Response,
+                        responses={200: {'content': {'application/pdf': {}}}})
+async def preview_cv_pdf(data: CvPreviewInput, user: CurrentUser) -> Response:
+    """Render unsaved content and verify source drafts without writing records."""
+    source = None
+    if data.tailorDraftId is not None:
+        _, source = await require_current_draft(data.tailorDraftId, user)
+    elif data.cvId is not None and any(unsafe_contact_link(link) for link in data.content.links):
+        source = await owned_cv(data.cvId, user)
+    reject_new_unsafe_links(data.content, source.content if source else None)
+    content = data.content.model_dump()
+    name = content['fullName'] or user.full_name
+    email = content['email'] or user.email
+    pdf = await render_pdf(render_saved_cv_pdf, name, email, content)
     return Response(pdf, media_type='application/pdf',
                     headers={'Content-Disposition': 'inline; filename="preview.pdf"'})
 
 
+router.include_router(cv_payload_router)
+
+
 class MeUpdate(BaseModel):
-    name: str | None = Field(None, min_length=1)
+    name: AccountName | None = None
     email: EmailStr | None = None
-    currentPassword: str | None = None
+    currentPassword: ExistingPassword | None = None
 
 
-@router.patch('/me')
+@auth_payload_router.patch('/me')
 async def update_me(data: MeUpdate, user: CurrentUser):
     if data.email and data.email.lower() != user.email:
-        if not data.currentPassword or not verify_password(data.currentPassword, user.hashed_password):
+        if not data.currentPassword or not await verify_password(data.currentPassword, user.hashed_password):
             raise HTTPException(403, 'Current password required to change email')
         user.email = data.email.lower()
     if data.name is not None:
@@ -317,17 +345,20 @@ async def update_me(data: MeUpdate, user: CurrentUser):
 
 
 class PasswordInput(BaseModel):
-    current: str
-    next: str = Field(min_length=8)
+    current: ExistingPassword
+    next: NewPassword
 
 
-@router.post('/me/password', status_code=204)
-async def change_password(data: PasswordInput, user: CurrentUser, response: Response):
-    if not verify_password(data.current, user.hashed_password):
+@auth_payload_router.post('/me/password', status_code=204)
+async def change_password(data: PasswordInput, user: CurrentUser, request: Request, response: Response):
+    if not await verify_password(data.current, user.hashed_password):
         raise HTTPException(403, 'Incorrect password')
-    user.hashed_password = hash_password(data.next)
+    user.hashed_password = await hash_password(data.next)
     await user.save()
     # Revoke other sessions while keeping this browser signed in.
     await RefreshToken.find(RefreshToken.user_id == user.id).delete()
-    await session(user, response)
+    await session(user, request, response)
 
+
+
+router.include_router(auth_payload_router)

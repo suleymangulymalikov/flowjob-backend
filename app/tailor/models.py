@@ -13,9 +13,11 @@ from pydantic import Field
 class TailorDraft(Document):
     user_id: Annotated[PydanticObjectId, Indexed()]
     source_cv_id: PydanticObjectId
+    source_cv_revision: str | None = None  # absent on drafts created before source verification
     match_id: str | None = None
     job_title: str
     company: str | None = None
+    job_url: str | None = None
 
     cv_hash: str
     job_hash: str

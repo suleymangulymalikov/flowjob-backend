@@ -1,9 +1,12 @@
 """Request schemas for the applications API. Field names are camelCase to match the UI."""
 from datetime import UTC, date, datetime
+from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from app.applications.models import ApplicationStatus, WorkArrangement
+
+ApplicationLabel = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 def _clean_url(v: str | None) -> str | None:
@@ -24,8 +27,8 @@ def _not_future(v: date | None) -> date | None:
 
 
 class ApplicationCreate(BaseModel):
-    company: str = Field(min_length=1, max_length=200)
-    jobTitle: str = Field(min_length=1, max_length=200)
+    company: ApplicationLabel
+    jobTitle: ApplicationLabel
     status: ApplicationStatus = ApplicationStatus.saved
     jobUrl: str | None = None
     location: str | None = Field(default=None, max_length=200)
@@ -41,10 +44,10 @@ class ApplicationCreate(BaseModel):
 
 
 class ApplicationUpdate(BaseModel):
-    """All fields optional; only those sent are changed (PATCH semantics)."""
+    """Only supplied fields change. Null clears an optional value."""
 
-    company: str | None = Field(default=None, min_length=1, max_length=200)
-    jobTitle: str | None = Field(default=None, min_length=1, max_length=200)
+    company: ApplicationLabel | None = None
+    jobTitle: ApplicationLabel | None = None
     status: ApplicationStatus | None = None
     jobUrl: str | None = None
     location: str | None = Field(default=None, max_length=200)
@@ -57,3 +60,11 @@ class ApplicationUpdate(BaseModel):
 
     _v_url = field_validator('jobUrl')(_clean_url)
     _v_date = field_validator('dateApplied')(_not_future)
+
+    @field_validator('company', 'jobTitle', 'status', mode='before')
+    @classmethod
+    def required_when_supplied(cls, value):
+        # Pydantic does not validate the omitted defaults, only supplied values.
+        if value is None:
+            raise ValueError('This field cannot be null.')
+        return value

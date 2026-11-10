@@ -6,8 +6,9 @@ from urllib.parse import urlsplit
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup, escape
-from weasyprint import HTML
+from weasyprint import HTML, URLFetcher
 
+from app.cv.content import MAX_PDF_PAGES, CvWorkloadError, unsafe_contact_link, validate_workload
 from app.profiles.schemas import ProfileData
 
 env = Environment(
@@ -54,7 +55,7 @@ def contact_item(value: str) -> str | Markup:
 
     Any other value is returned unchanged so unrelated legacy entries are never altered or dropped.
     """
-    safe = _safe_url(value)
+    safe = None if unsafe_contact_link(value) else _safe_url(value)
     if safe:
         host, url = safe
         for domain, label in _LABELLED_HOSTS.items():
@@ -64,7 +65,10 @@ def contact_item(value: str) -> str | Markup:
 
 
 def format_month(value: str) -> str:
-    return datetime.strptime(value, "%Y-%m").strftime("%b %Y")
+    try:
+        return datetime.strptime(value, "%Y-%m").strftime("%b %Y")
+    except ValueError:
+        return value  # legacy values such as 0000-01 are displayed as written
 
 
 def format_dates(start: str, end: str | None) -> str:
@@ -187,16 +191,34 @@ def _render_context_to_pdf(context: dict) -> bytes:
     If it still doesn't fit at the smallest step, the multi-page result is returned.
     """
     template = env.get_template("harvard.html")
-    for font_size, margin in FIT_STEPS:
+    # The Harvard template is self-contained. Hyperlinks stay clickable, but
+    # WeasyPrint cannot fetch network, file, or data resources.
+    fetcher = URLFetcher(allowed_protocols=())
+
+    def render(step):
+        font_size, margin = step
         html = template.render(**context, font_size=font_size, margin=margin)
-        document = HTML(string=html).render()
-        if len(document.pages) == 1:
-            break
+        return HTML(string=html, url_fetcher=fetcher).render()
+
+    document = render(FIT_STEPS[0])
+    if len(document.pages) > 1:
+        smallest = render(FIT_STEPS[-1])
+        if len(smallest.pages) > MAX_PDF_PAGES:
+            raise CvWorkloadError('This CV exceeds the 16-page PDF limit. Shorten it and try again.')
+        document = smallest
+        if len(smallest.pages) == 1:
+            # Keep the largest single-page fit for CVs that fit after shrinking.
+            for step in FIT_STEPS[1:-1]:
+                candidate = render(step)
+                if len(candidate.pages) == 1:
+                    document = candidate
+                    break
     return document.write_pdf()
 
 
 def render_cv_pdf(name: str, email: str, profile: ProfileData) -> bytes:
     """Render a Harvard-style CV from the native profile model."""
+    validate_workload(profile.model_dump(mode='json', include=set(ProfileData.model_fields)))
     return _render_context_to_pdf(build_context(name, email, profile))
 
 

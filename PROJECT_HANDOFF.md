@@ -88,7 +88,9 @@ npm run build
 
 Frontend: http://localhost:5173; backend docs: http://localhost:8000/docs; health: http://localhost:8000/health. Startup requires reachable MongoDB even for health checks. Production needs its own `/api/v1` proxy; Vite's development proxy is not production hosting.
 
-## Tests and safe repeat procedure
+## Historical test results
+
+For current backend testing, see [README.md](README.md#tests). The restored backend now requires pytest to start its own disposable MongoDB.
 
 Audit results:
 
@@ -102,20 +104,7 @@ Audit results:
 
 Frontend tests emitted React Router future notices and jsdom `window.scrollTo` not-implemented stderr; checks still passed. Logs are under `.handoff/`. Initial sandbox restrictions blocked local MongoDB socket/connect access; rerunning with authorized local access succeeded.
 
-CRITICAL: `backend/tests/conftest.py` hardcodes `flowjob_test` and calls `delete_all()` on collections before every test. Its default URI comes from `.env`, potentially shared Atlas. Do NOT follow the old README's bare `uv run pytest` command.
-
-For this audit a new MongoDB 8.0.10 instance was started with a fresh `.handoff/test-mongo` dbpath, bound only to `127.0.0.1:27991`, with `--nounixsocket`. Tests explicitly used:
-
-```sh
-# From backend/, ONLY after starting and verifying your own disposable mongod instance:
-MONGODB_URI='mongodb://127.0.0.1:27991/?serverSelectionTimeoutMS=3000' \
-MONGODB_DB_NAME=flowjob_test \
-OPENAI_API_KEY=mock \
-JWT_SECRET=handoff-test-only-secret-at-least-32-bytes \
-.venv/bin/python -m pytest -q
-```
-
-This is a nonproduction test secret, not an application credential. Use a fresh dbpath and unused port on subsequent runs; verify ownership of the process and stop only that process afterward. The audit instance has been stopped. No Atlas data was touched, no real AI request was made.
+For the original handoff audit, the backend tests used a disposable MongoDB 8.0.10 with a fresh data directory and mocked OpenAI. That instance has been stopped. No Atlas data was touched and no paid AI requests were made.
 
 ## Secret handling verification
 
@@ -128,7 +117,7 @@ This is a nonproduction test secret, not an application credential. Use a fresh 
 ## Known issues and limits
 
 1. Git metadata is missing from the export. Recover source into existing histories via fresh checkouts; do not invent ancestry or initialize replacement repositories over these folders.
-2. Root integration README incorrectly says applications/matching/tailoring are unimplemented and saved-CV export is browser-only. Backend README's default test command is unsafe with shared Atlas configuration.
+2. Root integration README incorrectly says applications/matching/tailoring are unimplemented and saved-CV export is browser-only. The original export's backend test command was unsafe with shared Atlas configuration. The restored backend uses the isolated launcher documented in README.md.
 3. Gmail connect/sync, password recovery, account export/deletion, application suggestion-review/undo hooks have frontend paths but no matching real backend implementations. Mock handlers are not evidence of completion.
 4. AI factuality is not guaranteed by prompts. `grounded()` checks whether original text matches/includes source text, not whether suggested text introduces new facts. Ungrounded items are flagged, not rejected server-side. User review and further validation remain necessary; never fabricate qualifications.
 5. Tailoring enforces an AI global daily quota, but matching's reservation currently only enforces its own per-user quota. The stated global cap does not cover all matching calls.

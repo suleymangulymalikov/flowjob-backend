@@ -2,10 +2,11 @@
 
 `TailoringAnalysis` is the model's structured output: a bounded list of section-level change
 proposals, each tied to an existing CV section and carrying the ORIGINAL text it rewrites.
-The backend validates that `original` really exists in the CV (factual grounding) and only
-applies changes the user accepts — the model never replaces the CV wholesale.
+The backend verifies that `original` identifies an exact source target. Changes beyond
+verifiable formatting need explicit review before the frontend applies them.
 """
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -48,3 +49,25 @@ class CreateTailor(BaseModel):
     jobTitle: str | None = Field(default=None, max_length=200)
     jobDescription: str | None = None
     company: str | None = Field(default=None, max_length=200)
+    jobUrl: str | None = Field(default=None, max_length=2048)
+    fresh: bool = False
+
+
+class TailorDraftResponse(BaseModel):
+    id: str
+    sourceCvId: str
+    sourceCvRevision: str | None  # Explicit null identifies a stored legacy draft.
+    matchId: str | None
+    jobTitle: str
+    company: str
+    jobUrl: str | None = None
+    suggestions: list[dict[str, Any]]
+    missingQualifications: list[str]
+    questions: list[str]
+    tokens: dict[str, int]
+    estimatedCostUsd: float
+    createdAt: str
+
+
+class VerifiedTailorDraftResponse(TailorDraftResponse):
+    sourceCvRevision: str = Field(min_length=1)

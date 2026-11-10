@@ -14,3 +14,13 @@ class RefreshToken(Document):
         name = "refresh_tokens"
         # MongoDB deletes documents automatically once expires_at has passed.
         indexes = [IndexModel("expires_at", expireAfterSeconds=0)]
+
+
+class AuthRateBucket(Document):
+    id: str
+    attempts: int
+    expires_at: datetime
+
+    class Settings:
+        name = 'auth_rate_limits'
+        indexes = [IndexModel('expires_at', expireAfterSeconds=0)]

@@ -22,6 +22,7 @@ class MatchRecord(Document):
 
     # Cache key parts (hashes, not raw content).
     cv_hash: str
+    cv_revision: str | None = None  # absent on historical reports
     job_hash: str
     model: str
     prompt_version: str
@@ -55,7 +56,7 @@ class MatchRecord(Document):
 
 
 class MatchUsage(Document):
-    """Atomic per-user, per-UTC-day analysis counter for quota enforcement."""
+    """Collection and unique day index for AI quota, including legacy usage rows."""
 
     user_id: PydanticObjectId
     day: str  # YYYY-MM-DD (UTC)
