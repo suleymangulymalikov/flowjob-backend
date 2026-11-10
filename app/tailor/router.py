@@ -7,7 +7,6 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-import pymongo
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,9 +16,11 @@ from app.auth.dependencies import get_current_user
 from app.config import settings
 from app.cv.revision import content_revision
 from app.integration.models import SavedCv
-from app.matches.models import MatchRecord, MatchUsage
+from app.matches.models import MatchRecord
 from app.services import ai_tailoring
-from app.services.ai_cache import cache_lock, cache_model, job_fingerprint
+from app.services.ai_cache import cache_model, coalesce_request, job_fingerprint
+from app.services.ai_provider import AiError, error_response, estimate_cost_usd
+from app.services.ai_quota import generation_quota
 from app.tailor.drafts import owned_draft
 from app.tailor.grounding import safe_to_auto_apply, target_text
 from app.tailor.models import TailorDraft
@@ -35,7 +36,6 @@ from app.users.models import User
 
 router = APIRouter(prefix='/api/v1', tags=['tailor'])
 CurrentUser = Annotated[User, Depends(get_current_user)]
-_GLOBAL = PydanticObjectId('000000000000000000000000')  # sentinel owner for the global daily counter
 
 
 def _sha(text: str) -> str:
@@ -68,37 +68,6 @@ def job_context_from_match(result: dict[str, Any]) -> str:
         for r in result.get(key) or []:
             lines.append(f'- [{label}] {r.get("requirement")} ({r.get("importance")})')
     return '\n'.join(x for x in lines if x)
-
-
-# --- quota (atomic; per-user tailor cap + shared global cap) ---------------------
-
-async def _inc(owner: PydanticObjectId, day_key: str) -> int:
-    doc = await MatchUsage.get_pymongo_collection().find_one_and_update(
-        {'user_id': owner, 'day': day_key}, {'$inc': {'used': 1}},
-        upsert=True, return_document=pymongo.ReturnDocument.AFTER)
-    return doc['used']
-
-
-async def _dec(owner: PydanticObjectId, day_key: str) -> None:
-    await MatchUsage.get_pymongo_collection().update_one(
-        {'user_id': owner, 'day': day_key}, {'$inc': {'used': -1}})
-
-
-async def reserve_quota(user_id: PydanticObjectId) -> None:
-    day = datetime.now(UTC).date().isoformat()
-    if await _inc(user_id, f'tailor:{day}') > settings.tailor_daily_quota:
-        await _dec(user_id, f'tailor:{day}')
-        raise HTTPException(429, 'Daily CV tailoring limit reached. Please try again tomorrow.')
-    if await _inc(_GLOBAL, f'ai-global:{day}') > settings.ai_global_daily_quota:
-        await _dec(_GLOBAL, f'ai-global:{day}')
-        await _dec(user_id, f'tailor:{day}')
-        raise HTTPException(503, 'The AI service is at capacity today. Please try again tomorrow.')
-
-
-async def release_quota(user_id: PydanticObjectId) -> None:
-    day = datetime.now(UTC).date().isoformat()
-    await _dec(user_id, f'tailor:{day}')
-    await _dec(_GLOBAL, f'ai-global:{day}')
 
 
 # --- presentation ----------------------------------------------------------------
@@ -154,11 +123,6 @@ async def _owned_cv(cv_id, user: User) -> SavedCv:
     return cv
 
 
-_ERRS = {
-    ai_tailoring.AiError: (502, 'The AI service is unavailable. Please try again.'),
-}
-
-
 @router.get('/tailor/capabilities')
 async def tailoring_capabilities() -> dict[str, int]:
     # The UI checks compatibility before making a potentially billable request.
@@ -207,60 +171,54 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
     job_hash = job_fingerprint(job_title, company, job_url, job_context)
     model = cache_model()
 
-    async with cache_lock('tailor', user.id, cv.id, revision, match_id, job_hash, model, TAILORING_PROMPT_VERSION):
-        # Legacy drafts have no source revision, so they never qualify for reuse.
-        # Only an explicit fresh request can bypass an otherwise verified cache hit.
-        if not data.fresh:
-            cutoff = datetime.now(UTC) - timedelta(hours=settings.tailor_cache_ttl_hours)
-            cached = await TailorDraft.find(
-                TailorDraft.user_id == user.id, TailorDraft.cv_hash == cv_hash, TailorDraft.job_hash == job_hash,
-                TailorDraft.source_cv_id == cv.id, TailorDraft.source_cv_revision == revision,
-                TailorDraft.match_id == match_id,
-                TailorDraft.model == model, TailorDraft.prompt_version == TAILORING_PROMPT_VERSION,
-                TailorDraft.created_at > cutoff, ignore_cache=True,
-            ).sort('-created_at').first_or_none()
-            if cached:
-                return present(cached)
+    async def lookup() -> TailorDraft | None:
+        cutoff = datetime.now(UTC) - timedelta(hours=settings.tailor_cache_ttl_hours)
+        return await TailorDraft.find(
+            TailorDraft.user_id == user.id, TailorDraft.cv_hash == cv_hash, TailorDraft.job_hash == job_hash,
+            TailorDraft.source_cv_id == cv.id, TailorDraft.source_cv_revision == revision,
+            TailorDraft.match_id == match_id,
+            TailorDraft.model == model, TailorDraft.prompt_version == TAILORING_PROMPT_VERSION,
+            TailorDraft.created_at > cutoff, ignore_cache=True,
+        ).sort('-created_at').first_or_none()
 
-        await reserve_quota(user.id)
-        try:
-            out = await run_in_threadpool(ai_tailoring.analyze, job_title, company, job_context, sections)
-        except ai_tailoring.AiError as e:
-            await release_quota(user.id)
-            status, message = next(((s, m) for t, (s, m) in _ERRS.items() if isinstance(e, t)),
-                                   (502, 'The AI service is unavailable.'))
-            # Reuse the richer mapping from matching for specific error types.
-            from app.matches.router import _ERROR_STATUS
-            status, message = _ERROR_STATUS.get(type(e), (status, message))
-            raise HTTPException(status, message)
+    async def generate() -> TailorDraft:
+        async with generation_quota(user.id, 'tailor'):
+            try:
+                out = await run_in_threadpool(ai_tailoring.analyze, job_title, company, job_context, sections)
+            except AiError as error:
+                status, message = error_response(error)
+                raise HTTPException(status, message) from error
 
-        analysis: TailoringAnalysis = out.analysis
-        # Bind the exact target text, and accept at most one proposal for each target.
-        suggestions = []
-        seen_targets = set()
-        for i, change in enumerate(analysis.changes):
-            original = target_text(cv.content, change)
-            target = (change.section, change.experience_id, change.bullet_index, change.project_id)
-            if not original or not original.strip() or change.original.strip() != original.strip():
-                continue
-            if not change.suggested.strip() or target in seen_targets:
-                continue
-            seen_targets.add(target)
-            review_required = change.review_required or not safe_to_auto_apply(change, original, cv.content)
-            suggestions.append(_suggestion_dto(change, i, original, review_required))
+            analysis: TailoringAnalysis = out.analysis
+            # Bind the exact target text, and accept at most one proposal for each target.
+            suggestions = []
+            seen_targets = set()
+            for i, change in enumerate(analysis.changes):
+                original = target_text(cv.content, change)
+                target = (change.section, change.experience_id, change.bullet_index, change.project_id)
+                if not original or not original.strip() or change.original.strip() != original.strip():
+                    continue
+                if not change.suggested.strip() or target in seen_targets:
+                    continue
+                seen_targets.add(target)
+                review_required = change.review_required or not safe_to_auto_apply(change, original, cv.content)
+                suggestions.append(_suggestion_dto(change, i, original, review_required))
 
-        draft = TailorDraft(
-            user_id=user.id, source_cv_id=cv.id, source_cv_revision=revision,
-            match_id=match_id, job_title=job_title, company=company, job_url=job_url,
-            cv_hash=cv_hash, job_hash=job_hash, model=out.model, prompt_version=out.prompt_version,
-            suggestions=suggestions,
-            missing_qualifications=analysis.missing_qualifications,
-            clarifying_questions=analysis.clarifying_questions,
-            input_tokens=out.usage.input_tokens, output_tokens=out.usage.output_tokens,
-            estimated_cost_usd=ai_tailoring.estimate_cost_usd(out.usage),
-        )
-        await draft.insert()
-        return present(draft)
+            draft = TailorDraft(
+                user_id=user.id, source_cv_id=cv.id, source_cv_revision=revision,
+                match_id=match_id, job_title=job_title, company=company, job_url=job_url,
+                cv_hash=cv_hash, job_hash=job_hash, model=out.model, prompt_version=out.prompt_version,
+                suggestions=suggestions,
+                missing_qualifications=analysis.missing_qualifications,
+                clarifying_questions=analysis.clarifying_questions,
+                input_tokens=out.usage.input_tokens, output_tokens=out.usage.output_tokens,
+                estimated_cost_usd=estimate_cost_usd(out.usage),
+            )
+            await draft.insert()
+        return draft
+
+    identity = ('tailor', user.id, cv.id, revision, match_id, job_hash, model, TAILORING_PROMPT_VERSION)
+    return present(await coalesce_request(identity, lookup, generate, fresh=data.fresh))
 
 
 @router.get('/tailor/{draft_id}', response_model=TailorDraftResponse)

@@ -56,3 +56,27 @@ Set `FLOWJOB_TEST_MONGOD=/path/to/mongod` if it isn't on your PATH. You can appe
 Pytest starts and verifies its own MongoDB process before collecting tests. It listens only on a private Unix socket and uses a fresh data directory and a randomly named database for each run. The HTTP test fixture clears only that database between tests. Pytest shuts down the process and removes its directory at the end of the run.
 
 The test runner rejects exported MongoDB settings, including Atlas, localhost and an explicit database name. It ignores the development `.env` and sets a throwaway JWT signing secret and `OPENAI_API_KEY=mock`. CI uses the same launcher with MongoDB 8.0 inside the test job.
+
+## AI generation limits
+
+Job Match and AI Tailoring each have a per-user limit for the UTC day
+(`MATCH_DAILY_QUOTA=20` and `TAILOR_DAILY_QUOTA=10` by default). New generations in
+either workflow count toward the same global limit (`AI_GLOBAL_DAILY_QUOTA=500`).
+Cache hits and draft/report reads use no new quota. Per-user exhaustion returns
+429 and global exhaustion returns 503.
+
+The backend reserves both quota units in one MongoDB update before calling the
+provider. The reservation holds its original UTC day. Successful results keep
+both charges after persistence, and failed generations refund both units in
+one update. Refunds can safely be repeated. The first reservation of a UTC day
+carries forward any usage that the legacy code recorded for that day.
+
+Identical requests in flight in the same backend process share a result or
+failure. An explicit fresh tailoring request bypasses cached drafts. Each
+generation makes a single OpenAI SDK attempt, with no automatic retries.
+A later explicit retry can send a new request after a timeout or other failure.
+
+Workers share the quota through MongoDB and coalesce requests within each
+process. Deploy the same quota implementation to all workers. A process crash
+or a database outage that prevents settlement can leave a charge for that UTC
+day, including when the provider outcome is unknown.

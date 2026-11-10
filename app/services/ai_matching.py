@@ -10,11 +10,11 @@ Safety/cost notes:
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 from app.config import settings
 from app.matches.schemas import AiAnalysis, PROMPT_VERSION
+from app.services.ai_provider import Usage, request_analysis
 
 SYSTEM_PROMPT = (
     'You are a careful, professional career assistant that evaluates how well a candidate\'s '
@@ -41,50 +41,12 @@ SYSTEM_PROMPT = (
 )
 
 
-class AiError(Exception):
-    """Base class for provider failures mapped to HTTP responses by the router."""
-
-
-class AiNotConfigured(AiError):
-    pass
-
-
-class AiTimeout(AiError):
-    pass
-
-
-class AiRateLimited(AiError):
-    pass
-
-
-class AiInvalidResponse(AiError):
-    pass
-
-
-class AiProviderError(AiError):
-    pass
-
-
-@dataclass
-class Usage:
-    input_tokens: int
-    output_tokens: int
-
-
 @dataclass
 class AnalysisResult:
     analysis: AiAnalysis
     usage: Usage
     model: str
     prompt_version: str = PROMPT_VERSION
-
-
-def _client():
-    if not settings.openai_api_key:
-        raise AiNotConfigured('AI matching is not configured.')
-    from openai import OpenAI  # imported lazily so the app runs without the key
-
-    return OpenAI(api_key=settings.openai_api_key, timeout=settings.openai_timeout_seconds)
 
 
 def build_input(job_title: str, company: str | None, job_description: str, cv_evidence: str) -> str:
@@ -150,7 +112,7 @@ def _mock_result() -> AnalysisResult:
 
 
 def analyze(job_title: str, company: str | None, job_description: str, cv_evidence: str) -> AnalysisResult:
-    """Call OpenAI once (with bounded retries) and return validated structured analysis.
+    """Call OpenAI once and return validated structured analysis.
 
     Raises an AiError subclass on failure; the router maps these to HTTP status codes.
     With OPENAI_API_KEY=mock, returns a canned analysis without any network call or charge.
@@ -158,58 +120,6 @@ def analyze(job_title: str, company: str | None, job_description: str, cv_eviden
     if settings.openai_api_key == 'mock':
         return _mock_result()
 
-    import openai
-
-    client = _client()
     user_input = build_input(job_title, company, job_description, cv_evidence)
-    last_exc: Exception | None = None
-
-    for attempt in range(3):  # 1 try + 2 retries, transient errors only
-        try:
-            resp = client.responses.parse(
-                model=settings.openai_model,
-                input=[
-                    {'role': 'system', 'content': SYSTEM_PROMPT},
-                    {'role': 'user', 'content': user_input},
-                ],
-                text_format=AiAnalysis,
-                max_output_tokens=settings.openai_max_output_tokens,
-                store=False,  # do not retain the request/response on OpenAI's side
-            )
-        except openai.APITimeoutError as e:
-            last_exc = e
-        except openai.RateLimitError as e:
-            # Rate limits are transient; back off and retry a bounded number of times.
-            last_exc = e
-        except openai.APIConnectionError as e:
-            last_exc = e
-        except openai.APIError as e:  # other provider-side errors: do not retry
-            raise AiProviderError(str(e)) from e
-        else:
-            parsed = resp.output_parsed
-            if parsed is None:
-                raise AiInvalidResponse('Model returned no structured output.')
-            usage = getattr(resp, 'usage', None)
-            return AnalysisResult(
-                analysis=parsed,
-                usage=Usage(
-                    input_tokens=int(getattr(usage, 'input_tokens', 0) or 0),
-                    output_tokens=int(getattr(usage, 'output_tokens', 0) or 0),
-                ),
-                model=settings.openai_model,
-            )
-        time.sleep(0.5 * (2**attempt))  # 0.5s, 1s backoff
-
-    if isinstance(last_exc, openai.APITimeoutError):
-        raise AiTimeout('The AI provider timed out.') from last_exc
-    if isinstance(last_exc, openai.RateLimitError):
-        raise AiRateLimited('The AI provider is rate limiting requests.') from last_exc
-    raise AiProviderError(str(last_exc) if last_exc else 'Unknown provider error.')
-
-
-def estimate_cost_usd(usage: Usage) -> float:
-    return round(
-        usage.input_tokens / 1_000_000 * settings.openai_input_price_per_1m
-        + usage.output_tokens / 1_000_000 * settings.openai_output_price_per_1m,
-        6,
-    )
+    parsed, usage = request_analysis(SYSTEM_PROMPT, user_input, AiAnalysis)
+    return AnalysisResult(analysis=parsed, usage=usage, model=settings.openai_model)

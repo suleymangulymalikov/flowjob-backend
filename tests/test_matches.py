@@ -15,8 +15,9 @@ from app.matches.schemas import (
     RequirementAssessment,
     SuggestedWording,
 )
-from app.services import ai_matching, ai_tailoring
-from app.services.ai_matching import AnalysisResult, Usage
+from app.services import ai_matching, ai_provider, ai_tailoring
+from app.services.ai_matching import AnalysisResult
+from app.services.ai_provider import Usage
 from app.tailor import router as tailor_router
 
 BASE = '/api/v1'
@@ -161,11 +162,11 @@ def test_prompt_injection_is_treated_as_data(client, mock_ai):
 # --- provider errors --------------------------------------------------------------
 
 @pytest.mark.parametrize('exc,code', [
-    (ai_matching.AiNotConfigured, 503),
-    (ai_matching.AiTimeout, 504),
-    (ai_matching.AiRateLimited, 429),
-    (ai_matching.AiInvalidResponse, 502),
-    (ai_matching.AiProviderError, 502),
+    (ai_provider.AiNotConfigured, 503),
+    (ai_provider.AiTimeout, 504),
+    (ai_provider.AiRateLimited, 429),
+    (ai_provider.AiInvalidResponse, 502),
+    (ai_provider.AiProviderError, 502),
 ])
 def test_provider_errors_mapped(client, monkeypatch, exc, code):
     def boom(*a, **k):
@@ -267,53 +268,67 @@ def test_historical_match_without_revision_remains_readable_but_is_not_reused(cl
     assert client.get(f'{endpoint}/{first["id"]}', headers=h).json() == historical
 
 
-@pytest.mark.parametrize('path,router_module,provider', [
-    ('matches', matches_router, ai_matching),
-    ('tailor', tailor_router, ai_tailoring),
+@pytest.mark.parametrize('provider_fails', [False, True])
+@pytest.mark.parametrize('path,router_module,provider,fresh', [
+    ('matches', matches_router, ai_matching, False),
+    ('tailor', tailor_router, ai_tailoring, False),
+    ('tailor', tailor_router, ai_tailoring, True),
 ])
-def test_concurrent_identical_requests_share_one_generation(client, monkeypatch, path, router_module, provider):
+def test_concurrent_identical_requests_share_one_generation(
+    client, monkeypatch, path, router_module, provider, fresh, provider_fails,
+):
     h = signup(client)
     body = {'cvId': make_cv(client, h), 'jobTitle': 'Dev', 'jobDescription': JOB}
+    if fresh:
+        body['fresh'] = True
     provider_started = Event()
-    second_lookup = Event()
+    second_joined = Event()
     finish_provider = Event()
     original_analyze = provider.analyze  # The test launcher forces the built-in mock.
-    original_lock = router_module.cache_lock
+    original_coalesce = router_module.coalesce_request
     calls = 0
-    lock_requests = 0
+    joined_requests = 0
 
     def analyze(*args):
         nonlocal calls
         calls += 1
         provider_started.set()
         assert finish_provider.wait(10)
+        if provider_fails and calls == 1:
+            raise ai_provider.AiTimeout()
         return original_analyze(*args)
 
-    def observe_lock(*identity):
-        nonlocal lock_requests
-        lock_requests += 1
-        if lock_requests == 2:
-            second_lookup.set()
-        return original_lock(*identity)
+    async def observe_coalesce(*args, **kwargs):
+        nonlocal joined_requests
+        joined_requests += 1
+        if joined_requests == 2:
+            second_joined.set()
+        return await original_coalesce(*args, **kwargs)
 
     def post():
         return client.post(f'{BASE}/{path}', headers=h, json=body)
 
     monkeypatch.setattr(provider, 'analyze', analyze)
-    monkeypatch.setattr(router_module, 'cache_lock', observe_lock)
+    monkeypatch.setattr(router_module, 'coalesce_request', observe_coalesce)
     with ThreadPoolExecutor(max_workers=2) as executor:
         try:
             first = executor.submit(post)
             assert provider_started.wait(5)
             second = executor.submit(post)
-            assert second_lookup.wait(5)
+            assert second_joined.wait(5)
         finally:
             finish_provider.set()
         r1, r2 = first.result(timeout=5), second.result(timeout=5)
 
-    assert r1.status_code == r2.status_code == 201
-    assert r1.json()['id'] == r2.json()['id']
     assert calls == 1
+    if provider_fails:
+        assert r1.status_code == r2.status_code == 504
+        assert r1.json() == r2.json() == {'detail': 'The analysis timed out. Please try again.'}
+        assert post().status_code == 201  # a later explicit retry is allowed
+        assert calls == 2
+    else:
+        assert r1.status_code == r2.status_code == 201
+        assert r1.json()['id'] == r2.json()['id']
 
 
 def test_cache_does_not_leak_between_users(client, mock_ai):
@@ -347,7 +362,7 @@ def test_failed_analysis_does_not_consume_quota(client, monkeypatch):
     def flaky(*a, **k):
         calls['n'] += 1
         if calls['n'] == 1:
-            raise ai_matching.AiTimeout('x')
+            raise ai_provider.AiTimeout('x')
         return AnalysisResult(analysis=analysis(), usage=Usage(1, 1), model='mock')
 
     monkeypatch.setattr(ai_matching, 'analyze', flaky)

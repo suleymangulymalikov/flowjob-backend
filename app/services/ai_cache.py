@@ -3,12 +3,19 @@
 import asyncio
 import hashlib
 import json
-from collections.abc import Hashable
-from weakref import WeakValueDictionary
+from collections.abc import Awaitable, Callable, Hashable
+from dataclasses import dataclass, field
 
 from app.config import settings
 
-_locks: WeakValueDictionary[tuple[Hashable, ...], asyncio.Lock] = WeakValueDictionary()
+
+@dataclass
+class _Flight:
+    fresh: bool
+    task: asyncio.Task = field(init=False)
+
+
+_flights: dict[tuple[Hashable, ...], _Flight] = {}
 
 
 def job_fingerprint(title: str, company: str | None, url: str | None, context: str) -> str:
@@ -21,9 +28,37 @@ def cache_model() -> str:
     return 'mock' if settings.openai_api_key == 'mock' else settings.openai_model
 
 
-def cache_lock(*identity: Hashable) -> asyncio.Lock:
-    """Serialize the lookup and generation for one identity in this server process."""
-    lock = _locks.get(identity)
-    if lock is None:
-        lock = _locks[identity] = asyncio.Lock()
-    return lock
+async def coalesce_request[T](
+    identity: tuple[Hashable, ...],
+    lookup: Callable[[], Awaitable[T | None]],
+    generate: Callable[[], Awaitable[T]],
+    *,
+    fresh: bool = False,
+) -> T:
+    """Share one in-flight result or error for this identity within a process."""
+    flight = _flights.get(identity)
+    if flight is None or flight.task.done():
+        flight = _flights[identity] = _Flight(fresh)
+
+        async def run() -> T:
+            if not flight.fresh:
+                cached = await lookup()
+                # An explicit fresh request may have joined during the lookup.
+                if cached is not None and not flight.fresh:
+                    return cached
+            return await generate()
+
+        def discard(task: asyncio.Task) -> None:
+            if _flights.get(identity) is flight:
+                del _flights[identity]
+            if not task.cancelled():
+                # Observe failures even if every caller has disconnected.
+                task.exception()
+
+        flight.task = asyncio.create_task(run())
+        flight.task.add_done_callback(discard)
+    elif fresh:
+        flight.fresh = True
+
+    # A disconnected waiter cannot cancel generation or its quota settlement.
+    return await asyncio.shield(flight.task)

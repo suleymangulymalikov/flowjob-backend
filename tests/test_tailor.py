@@ -3,8 +3,8 @@ from beanie import PydanticObjectId
 import pytest
 
 from app.config import settings
-from app.services import ai_matching, ai_tailoring
-from app.services.ai_matching import Usage
+from app.services import ai_matching, ai_provider, ai_tailoring
+from app.services.ai_provider import Usage
 from app.services.ai_tailoring import TailoringResult
 from app.tailor.models import TailorDraft
 from app.tailor.schemas import ChangeSection, ProposedChange, TailoringAnalysis
@@ -230,10 +230,10 @@ def test_tailored_cv_survives_source_deletion(client, mock_ai):
 # --- provider errors / quota / dedup / match reuse -------------------------------
 
 @pytest.mark.parametrize('exc,code', [
-    (ai_tailoring.AiTimeout, 504),
-    (ai_tailoring.AiRateLimited, 429),
-    (ai_tailoring.AiInvalidResponse, 502),
-    (ai_tailoring.AiNotConfigured, 503),
+    (ai_provider.AiTimeout, 504),
+    (ai_provider.AiRateLimited, 429),
+    (ai_provider.AiInvalidResponse, 502),
+    (ai_provider.AiNotConfigured, 503),
 ])
 def test_provider_errors_mapped(client, monkeypatch, exc, code):
     monkeypatch.setattr(ai_tailoring, 'analyze', lambda *a, **k: (_ for _ in ()).throw(exc('x')))

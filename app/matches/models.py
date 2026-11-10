@@ -56,7 +56,7 @@ class MatchRecord(Document):
 
 
 class MatchUsage(Document):
-    """Atomic per-user, per-UTC-day analysis counter for quota enforcement."""
+    """Collection and unique day index for AI quota, including legacy usage rows."""
 
     user_id: PydanticObjectId
     day: str  # YYYY-MM-DD (UTC)
