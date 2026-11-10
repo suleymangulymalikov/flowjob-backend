@@ -115,7 +115,7 @@ def test_remoexperts_scenario_scores_the_approved_way():
     assert result['qualificationCounts']['required'] == {'demonstrated': 3, 'partial': 1, 'not_shown': 1, 'count': 5}
     assert result['qualificationCounts']['standard']['count'] == 0
     assert result['diagnostics'] == {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
-                                     'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
+                                     'rejected_no_job_quote': 0, 'rejected_working_condition': 0, 'droppedCitations': []}
 
 
 def test_working_conditions_duties_and_traits_are_outside_the_scored_set():
@@ -154,8 +154,10 @@ def test_a_fabricated_quote_is_dropped_and_the_claim_earns_nothing():
     llm = next(r for r in result['requirements'] if r['id'] == 'r5')
     assert llm['status'] == 'not_shown' and llm['explanation'] == NOT_SHOWN_TEXT
     assert result['score'] == 66  # identical to the honest answer
-    assert result['diagnostics'] == {'citations_dropped': 1, 'statuses_downgraded': 1, 'duplicate_ids': 0,
-                                     'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
+    diag = result['diagnostics']
+    assert (diag['citations_dropped'], diag['statuses_downgraded']) == (1, 1)
+    assert diag['droppedCitations'] == [{'id': 'r5', 'path': 'experience.exp-1.bullets.0',
+                                         'quote': 'evaluated LLM outputs for RLHF'}]  # drops are never silent
 
 
 @pytest.mark.parametrize('path, quote', [

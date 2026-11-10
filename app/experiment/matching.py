@@ -70,8 +70,9 @@ SYSTEM_PROMPT = (
     'EVIDENCE (the most important part):\n'
     '- status: demonstrated (the CV genuinely shows it, at the requested level), partial (a meaningful '
     'component is shown), not_shown (otherwise — never guess, never invent).\n'
-    '- Cite evidence with the item path printed in square brackets in the CV, plus a VERBATIM quote from '
-    'that one item. Never cite one role or project for another.\n'
+    '- Cite evidence with the item path printed in square brackets in the CV — copy it exactly, without '
+    'the brackets (for example path "experience.exp-1.bullets.0" or "skills") — plus a VERBATIM quote '
+    'copied character-for-character from that one item. Never cite one role or project for another.\n'
     '- A quotation that exists in the CV is NOT evidence just because it is authentic. Before citing, ask: '
     'does this text itself show THIS requirement, at the level it asks? A mobile app project is not LLM '
     'evaluation experience; a listed skill is not advanced proficiency or years of experience; a generic '
@@ -157,7 +158,7 @@ def render_cv(content: dict[str, Any]) -> str:
 
 def valid_citation(content: dict[str, Any], citation: Citation) -> bool:
     """The quote must be a verbatim (case/whitespace-folded) part of exactly the cited item."""
-    text = _items(content).get(citation.path)
+    text = _items(content).get(citation.path.strip().strip('[]'))
     needle = _fold(citation.quote)
     return bool(text) and bool(needle) and needle in _fold(text)
 
@@ -203,8 +204,9 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text:
     """Verify job quotes, apply the condition backstop, validate CV citations, compute the score. Pure."""
     requirements: list[dict[str, Any]] = []
     rejected: list[dict[str, str]] = []
-    diagnostics = {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
-                   'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
+    diagnostics: dict[str, Any] = {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
+                                   'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
+    dropped: list[dict[str, str]] = []  # internal diagnostics: WHICH citations failed, so drops are never silent
     seen: set[str] = set()
     for r in analysis.requirements:
         if r.id in seen:  # a duplicate id can never count twice
@@ -221,6 +223,7 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text:
             rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'working_condition'})
             continue
         kept = [c for c in r.evidence if valid_citation(cv_content, c)]
+        dropped += [{'id': r.id, 'path': c.path, 'quote': c.quote} for c in r.evidence if c not in kept]
         diagnostics['citations_dropped'] += len(r.evidence) - len(kept)
         status = r.status
         explanation = r.explanation
@@ -275,7 +278,7 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text:
         'eligibilityWarnings': warnings,  # informational; they never change the score
         'excluded': [e.model_dump() for e in analysis.excluded],
         'rejected': rejected,  # proposals the backend refused to score
-        'diagnostics': diagnostics,
+        'diagnostics': {**diagnostics, 'droppedCitations': dropped},
         'promptVersion': EXPERIMENT_PROMPT_VERSION,
     }
 
