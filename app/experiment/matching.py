@@ -10,20 +10,27 @@ qualification at the requested level, and writing a short second-person explanat
 
 The CODE handles only what is mechanically verifiable:
 1. Validate the structured response (Pydantic).
-2. Resolve every CV citation to the one item it names and confirm the quote is verbatim there
-   (case/whitespace folding only — no fuzzy matching). A failed citation is dropped; a
-   demonstrated/partial status with no surviving citation becomes not_shown.
-3. Compute the percentage deterministically: shares Required 60 / Standard 25 / Preferred 15,
+2. Confirm every scored qualification quotes the JOB POST verbatim (case/whitespace folding only),
+   so an invented requirement is rejected rather than scored.
+3. One small backstop: a qualification whose own wording is a work arrangement, schedule or
+   employment type is excluded from scoring (reported, not scored). This is a safety net behind the
+   prompt, not a classifier — professional skills that merely mention such words are left alone.
+4. Resolve every CV citation to the one item it names and confirm the quote is verbatim there.
+   A failed citation is dropped; a demonstrated/partial status with no surviving citation becomes
+   not_shown.
+5. Compute the percentage deterministically: shares Required 60 / Standard 25 / Preferred 15,
    redistributed over non-empty categories; credit 100/50/0; round half up; minimum two distinct
    qualifications; preferred-only posts scored with a note; mandatory-credential warnings reported
    separately and never changing the score.
 
-There is deliberately no heading parser, no keyword dictionary, no topical-relevance heuristic and
-no category override here. What the backend cannot check, it does not pretend to check.
+There is deliberately no heading parser, no broad keyword dictionary and no semantic relevance
+validator here. Evidence RELEVANCE is the model's responsibility, enforced through its instructions;
+what the backend cannot check, it does not pretend to check.
 """
 from __future__ import annotations
 
 import math
+import re
 from fractions import Fraction
 from typing import Any, Literal
 
@@ -57,16 +64,21 @@ SYSTEM_PROMPT = (
     '- Keep "X and Y" combinations as ONE requirement and "X or Y" alternatives as ONE requirement. Merge '
     'duplicates. Set mandatory_credential=true only for an explicitly mandatory professional licence or '
     'certification.\n'
+    '- For every requirement, copy the line or fragment it comes from VERBATIM into source_quote (240 '
+    'characters at most). The application rejects any requirement whose quote it cannot find in the post.\n'
     '\n'
     'EVIDENCE (the most important part):\n'
     '- status: demonstrated (the CV genuinely shows it, at the requested level), partial (a meaningful '
     'component is shown), not_shown (otherwise — never guess, never invent).\n'
     '- Cite evidence with the item path printed in square brackets in the CV, plus a VERBATIM quote from '
     'that one item. Never cite one role or project for another.\n'
-    '- A quote is evidence only if it genuinely bears on the requirement: a mobile app project is not LLM '
+    '- A quotation that exists in the CV is NOT evidence just because it is authentic. Before citing, ask: '
+    'does this text itself show THIS requirement, at the level it asks? A mobile app project is not LLM '
     'evaluation experience; a listed skill is not advanced proficiency or years of experience; a generic '
-    'activity does not name a specific tool. Projects, coursework, internships, volunteering and '
-    'employment all count when relevant.\n'
+    'activity does not name a specific tool; experience from one role or project never transfers to a claim '
+    'about another. If no CV text genuinely bears on the requirement, cite nothing and use not_shown — '
+    'never stretch a loosely related quote to fit. Projects, coursework, internships, volunteering and '
+    'employment all count when they are genuinely relevant.\n'
     '- explanation: one concise second-person sentence ("Your CV shows ..."). For not_shown write exactly '
     '"Not shown in your CV." — never say the person lacks the skill.\n'
     '\n'
@@ -86,6 +98,7 @@ class Requirement(BaseModel):
     id: str = Field(max_length=16)
     requirement: str = Field(max_length=160)
     category: Literal['required', 'standard', 'preferred']
+    source_quote: str = Field(max_length=240)  # copied verbatim from the job description
     status: Literal['demonstrated', 'partial', 'not_shown']
     mandatory_credential: bool = False
     evidence: list[Citation] = Field(default_factory=list, max_length=3)
@@ -149,6 +162,29 @@ def valid_citation(content: dict[str, Any], citation: Citation) -> bool:
     return bool(text) and bool(needle) and needle in _fold(text)
 
 
+# --- small backstops (safety nets behind the prompt, not classifiers) --------------------------------
+
+# A requirement ABOUT a work arrangement, schedule or employment type. Deliberately narrow: it matches
+# statements of the arrangement itself, not professional skills that mention similar words (remote sensing,
+# shift-left testing, contract law).
+_CONDITION = re.compile(
+    r'\b(?:work(?:ing)? (?:remote\w*|on[- ]?site|from home)|remote(?:ly)?[, -]*(?:work|role|position|team|first)|'
+    r'hybrid (?:work\w*|role|model|schedule)|on[- ]?site (?:work\w*|role|position|presence)|'
+    r'(?:full|part)[- ]time|contract (?:role|position|basis)|temporary (?:role|position)|freelance|'
+    r'(?:work(?:ing)?|flexible) (?:hours|schedule)|\w+[- ]day (?:work(?:ing)? )?week|weekend\w*|shift work|on[- ]call|'
+    r'commut\w+|relocat\w+|willing(?:ness)? to travel|'
+    r'work (?:authori[sz]ation|permit|visa)|right to work|citizenship|visa sponsorship)\b', re.I)
+
+
+def is_working_condition(requirement: Requirement) -> bool:
+    return bool(_CONDITION.search(_fold(f'{requirement.requirement} {requirement.source_quote}')))
+
+
+def quote_in_job(job_text: str, quote: str) -> bool:
+    needle = _fold(quote)
+    return bool(needle) and any(ch.isalnum() for ch in needle) and needle in _fold(job_text)
+
+
 # --- deterministic scoring --------------------------------------------------------------------------
 
 SHARES = {'required': 60, 'standard': 25, 'preferred': 15}
@@ -163,16 +199,27 @@ def verdict_for(score: int | None) -> str:
     return 'Strong fit' if score >= 80 else 'Good fit' if score >= 60 else 'Partial fit' if score >= 40 else 'Low fit'
 
 
-def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any]) -> dict[str, Any]:
-    """Validate citations, settle statuses, compute the score. Pure and deterministic."""
+def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text: str) -> dict[str, Any]:
+    """Verify job quotes, apply the condition backstop, validate CV citations, compute the score. Pure."""
     requirements: list[dict[str, Any]] = []
-    diagnostics = {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0}
+    rejected: list[dict[str, str]] = []
+    diagnostics = {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
+                   'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
     seen: set[str] = set()
     for r in analysis.requirements:
         if r.id in seen:  # a duplicate id can never count twice
             diagnostics['duplicate_ids'] += 1
             continue
         seen.add(r.id)
+        if not quote_in_job(job_text, r.source_quote):
+            # Every scored qualification must reference real text from the post.
+            diagnostics['rejected_no_job_quote'] += 1
+            rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'quote_not_in_job'})
+            continue
+        if is_working_condition(r):
+            diagnostics['rejected_working_condition'] += 1
+            rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'working_condition'})
+            continue
         kept = [c for c in r.evidence if valid_citation(cv_content, c)]
         diagnostics['citations_dropped'] += len(r.evidence) - len(kept)
         status = r.status
@@ -227,6 +274,7 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any]) -> dict[s
         'qualificationCounts': counts,
         'eligibilityWarnings': warnings,  # informational; they never change the score
         'excluded': [e.model_dump() for e in analysis.excluded],
+        'rejected': rejected,  # proposals the backend refused to score
         'diagnostics': diagnostics,
         'promptVersion': EXPERIMENT_PROMPT_VERSION,
     }

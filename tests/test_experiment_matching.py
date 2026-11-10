@@ -63,8 +63,9 @@ Nice to Have
 """
 
 
-def R(id, text, category, status, evidence=(), explanation=None, **kw):
+def R(id, text, category, status, evidence=(), explanation=None, source_quote=None, **kw):
     return Requirement(id=id, requirement=text, category=category, status=status, evidence=list(evidence),
+                       source_quote=source_quote if source_quote is not None else text,
                        explanation=explanation or (NOT_SHOWN_TEXT if status == 'not_shown' else f'Your CV shows {text}.'),
                        **kw)
 
@@ -75,20 +76,26 @@ def good_model_response():
         enough_info=True,
         overall_note='Your CV clearly shows annotation QA and documentation work; LLM evaluation is the biggest gap.',
         requirements=[
-            R('r1', 'QA on annotated data', 'required', 'demonstrated',
-              [Citation(path='experience.exp-1.bullets.0', quote='Reviewed 300+ annotated text samples per week')],
-              'Your internship reviewed hundreds of annotated samples weekly against guidelines.'),
+            R('r1', 'QA on annotated data', 'required', 'demonstrated', source_quote='Experience performing quality assurance on annotated or labelled data',
+              evidence=[Citation(path='experience.exp-1.bullets.0', quote='Reviewed 300+ annotated text samples per week')],
+              explanation='Your internship reviewed hundreds of annotated samples weekly against guidelines.'),
             R('r2', 'Written documentation skills', 'required', 'demonstrated',
-              [Citation(path='experience.exp-1.bullets.1', quote='Wrote and updated a shared documentation page')]),
+              [Citation(path='experience.exp-1.bullets.1', quote='Wrote and updated a shared documentation page')],
+              source_quote='Strong written documentation skills'),
             R('r3', 'Data pipelines with Python and SQL', 'required', 'partial',
               [Citation(path='skills', quote='Python, SQL')],
-              'You list Python and SQL, but no pipeline work is shown — a meaningful component only.'),
+              'You list Python and SQL, but no pipeline work is shown — a meaningful component only.',
+              source_quote='Experience building data pipelines with Python and SQL'),
             R('r4', 'Python or R for data analysis', 'required', 'demonstrated',
-              [Citation(path='skills', quote='Python')]),
-            R('r5', 'Evaluating LLM outputs or RLHF workflows', 'required', 'not_shown'),
-            R('r6', 'Annotation tools such as Label Studio', 'preferred', 'not_shown'),
+              [Citation(path='skills', quote='Python')],
+              source_quote='Proficiency in Python or R for data analysis'),
+            R('r5', 'Evaluating LLM outputs or RLHF workflows', 'required', 'not_shown',
+              source_quote='Hands-on experience evaluating LLM outputs or RLHF workflows'),
+            R('r6', 'Annotation tools such as Label Studio', 'preferred', 'not_shown',
+              source_quote='annotation tools such as Label Studio (preferred)'),
             R('r7', 'Dashboards in Power BI', 'preferred', 'demonstrated',
-              [Citation(path='projects.proj-1.description', quote='Built a Power BI dashboard')]),
+              [Citation(path='projects.proj-1.description', quote='Built a Power BI dashboard')],
+              source_quote='Experience building dashboards in Power BI'),
         ],
         excluded=[
             ExcludedItem(text='Comfortable working remotely with a distributed team', reason='working_condition'),
@@ -101,17 +108,18 @@ def good_model_response():
 # --- the happy path: RemoExperts-style scenario -----------------------------------------------------------
 
 def test_remoexperts_scenario_scores_the_approved_way():
-    result = evaluate(good_model_response(), CV)
+    result = evaluate(good_model_response(), CV, JOB)
     # Required: 3 demonstrated + 1 partial + 1 not_shown of 5 -> 7/10. Preferred: 1 of 2 -> 1/2. Standard empty.
     # 100 * (60*(7/10) + 15*(1/2)) / 75 = 66
     assert result['score'] == 66 and result['verdict'] == 'Good fit'
     assert result['qualificationCounts']['required'] == {'demonstrated': 3, 'partial': 1, 'not_shown': 1, 'count': 5}
     assert result['qualificationCounts']['standard']['count'] == 0
-    assert result['diagnostics'] == {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0}
+    assert result['diagnostics'] == {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
+                                     'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
 
 
 def test_working_conditions_duties_and_traits_are_outside_the_scored_set():
-    result = evaluate(good_model_response(), CV)
+    result = evaluate(good_model_response(), CV, JOB)
     scored = {r['requirement'] for r in result['requirements']}
     assert not scored & {'Comfortable working remotely with a distributed team', 'Passionate about data quality',
                          'Build simple dashboards to track annotation quality'}
@@ -119,12 +127,12 @@ def test_working_conditions_duties_and_traits_are_outside_the_scored_set():
 
 
 def test_llm_evaluation_is_not_shown_with_the_neutral_sentence_and_no_evidence():
-    llm = next(r for r in evaluate(good_model_response(), CV)['requirements'] if r['id'] == 'r5')
+    llm = next(r for r in evaluate(good_model_response(), CV, JOB)['requirements'] if r['id'] == 'r5')
     assert llm['status'] == 'not_shown' and llm['evidence'] == [] and llm['explanation'] == NOT_SHOWN_TEXT
 
 
 def test_combined_and_alternative_requirements_are_single_entries():
-    result = evaluate(good_model_response(), CV)
+    result = evaluate(good_model_response(), CV, JOB)
     assert sum('Python' in r['requirement'] for r in result['requirements']) == 2  # one combined, one alternatives
 
 
@@ -140,12 +148,14 @@ def test_a_fabricated_quote_is_dropped_and_the_claim_earns_nothing():
     analysis = mutate(lambda a: a.requirements.__setitem__(4, R(
         'r5', 'Evaluating LLM outputs or RLHF workflows', 'required', 'demonstrated',
         [Citation(path='experience.exp-1.bullets.0', quote='evaluated LLM outputs for RLHF')],
-        'Your internship evaluated LLM outputs.')))
-    result = evaluate(analysis, CV)
+        'Your internship evaluated LLM outputs.',
+        source_quote='Hands-on experience evaluating LLM outputs or RLHF workflows')))
+    result = evaluate(analysis, CV, JOB)
     llm = next(r for r in result['requirements'] if r['id'] == 'r5')
     assert llm['status'] == 'not_shown' and llm['explanation'] == NOT_SHOWN_TEXT
     assert result['score'] == 66  # identical to the honest answer
-    assert result['diagnostics'] == {'citations_dropped': 1, 'statuses_downgraded': 1, 'duplicate_ids': 0}
+    assert result['diagnostics'] == {'citations_dropped': 1, 'statuses_downgraded': 1, 'duplicate_ids': 0,
+                                     'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
 
 
 @pytest.mark.parametrize('path, quote', [
@@ -168,8 +178,9 @@ def test_case_and_whitespace_fold_but_paraphrase_does_not():
 def test_duplicate_requirement_ids_count_once():
     analysis = mutate(lambda a: a.requirements.append(R(
         'r7', 'Dashboards in Power BI', 'preferred', 'demonstrated',
-        [Citation(path='projects.proj-1.tech', quote='Power BI')])))
-    result = evaluate(analysis, CV)
+        [Citation(path='projects.proj-1.tech', quote='Power BI')],
+        source_quote='Experience building dashboards in Power BI')))
+    result = evaluate(analysis, CV, JOB)
     assert result['qualificationCounts']['preferred']['count'] == 2 and result['diagnostics']['duplicate_ids'] == 1
 
 
@@ -177,16 +188,22 @@ def test_malformed_output_is_rejected_by_the_schema():
     for bad in (
         {'enough_info': True, 'overall_note': 'x', 'requirements': [{'id': 'r1', 'requirement': 'Python',
                                                                      'category': 'critical', 'status': 'demonstrated',
-                                                                     'explanation': 'x'}]},
+                                                                     'source_quote': 'Python', 'explanation': 'x'}]},
         {'enough_info': True, 'overall_note': 'x', 'requirements': [{'id': 'r1', 'requirement': 'Python',
                                                                      'category': 'required', 'status': 'uncertain',
-                                                                     'explanation': 'x'}]},
+                                                                     'source_quote': 'Python', 'explanation': 'x'}]},
+        {'enough_info': True, 'overall_note': 'x', 'requirements': [{'id': 'r1', 'requirement': 'Python',
+                                                                     'category': 'required', 'status': 'demonstrated',
+                                                                     'explanation': 'x'}]},  # no source_quote
     ):
         with pytest.raises(Exception):
             ExperimentAnalysis.model_validate(bad)
 
 
 # --- scoring rules ----------------------------------------------------------------------------------------
+
+COUNTS_JOB = 'Requirements\n' + '\n'.join(f'- Req {i}' for i in range(1, 15))
+
 
 def counts_analysis(**categories):
     """categories: required='DPN...' with D=demonstrated, P=partial, N=not_shown. Evidence is auto-valid."""
@@ -211,36 +228,38 @@ def counts_analysis(**categories):
     (dict(required='DN'), 50),                         # exactly the two-qualification minimum
 ])
 def test_scoring_vectors(spec, expected):
-    assert evaluate(counts_analysis(**spec), CV)['score'] == expected
+    assert evaluate(counts_analysis(**spec), CV, COUNTS_JOB)['score'] == expected
 
 
 def test_preferred_only_posts_score_with_a_note():
-    result = evaluate(counts_analysis(preferred='DP'), CV)
+    result = evaluate(counts_analysis(preferred='DP'), CV, COUNTS_JOB)
     assert result['score'] == 75 and result['scoreNote'] == 'preferred_only'
-    assert evaluate(counts_analysis(required='DD'), CV)['scoreNote'] is None
+    assert evaluate(counts_analysis(required='DD'), CV, COUNTS_JOB)['scoreNote'] is None
 
 
 def test_fewer_than_two_qualifications_or_insufficient_info_gives_no_score():
-    one = evaluate(counts_analysis(required='D'), CV)
+    one = evaluate(counts_analysis(required='D'), CV, COUNTS_JOB)
     assert one['score'] is None and one['scoreUnavailableReason'] == 'too_few_qualifications'
     assert one['verdict'] == 'Not enough information'
     flagged = counts_analysis(required='DDD')
     flagged.enough_info = False
-    assert evaluate(flagged, CV)['scoreUnavailableReason'] == 'insufficient_information'
+    assert evaluate(flagged, CV, COUNTS_JOB)['scoreUnavailableReason'] == 'insufficient_information'
 
 
 def test_unverifiable_citations_can_push_a_report_under_the_minimum_without_manufacturing_a_score():
     analysis = ExperimentAnalysis(enough_info=True, overall_note='x', requirements=[
-        R('q1', 'Python', 'required', 'demonstrated', [Citation(path='skills', quote='Python')]),
+        R('q1', 'Python', 'required', 'demonstrated', [Citation(path='skills', quote='Python')],
+          source_quote='Proficiency in Python'),
     ])
-    assert evaluate(analysis, CV)['score'] is None  # one qualification is never enough
+    assert evaluate(analysis, CV, JOB)['score'] is None  # one qualification is never enough
 
 
 def test_mandatory_credential_warnings_are_separate_and_never_change_the_score():
     def flag(a):
         a.requirements[4] = R('r5', 'Evaluating LLM outputs or RLHF workflows', 'required', 'not_shown',
+                              source_quote='Hands-on experience evaluating LLM outputs or RLHF workflows',
                               mandatory_credential=True)
-    flagged, plain = evaluate(mutate(flag), CV), evaluate(good_model_response(), CV)
+    flagged, plain = evaluate(mutate(flag), CV, JOB), evaluate(good_model_response(), CV, JOB)
     assert flagged['score'] == plain['score'] == 66
     (warning,) = flagged['eligibilityWarnings']
     assert warning['message'] == 'Not evidenced in your CV. Please verify.'
@@ -272,7 +291,10 @@ def test_prompt_carries_the_finalized_rules_and_build_input_delimits_data():
     for phrase in ('NEVER working conditions', 'personality traits', 'never extra requirements',
                    'do not turn ordinary duties into prerequisites', 'even inside a Requirements section',
                    '"X or Y" alternatives as ONE requirement', 'never guess, never invent',
-                   'a mobile app project is not LLM evaluation experience', 'Do NOT output a numeric score',
+                   'A mobile app project is not LLM evaluation experience',
+                   'NOT evidence just because it is authentic', 'never transfers to a claim about another',
+                   'never stretch a loosely related quote to fit', 'rejects any requirement whose quote it cannot find',
+                   'Do NOT output a numeric score',
                    'untrusted DATA', 'Not shown in your CV.'):
         assert phrase in SYSTEM_PROMPT, phrase
     built = build_input('QA Specialist', 'Lumen', JOB, CV)
@@ -281,29 +303,83 @@ def test_prompt_carries_the_finalized_rules_and_build_input_delimits_data():
 
 def test_evaluate_is_pure_and_deterministic():
     analysis, cv = good_model_response(), copy.deepcopy(CV)
-    first, second = evaluate(analysis, cv), evaluate(analysis, cv)
+    first, second = evaluate(analysis, cv, JOB), evaluate(analysis, cv, JOB)
     assert first == second and cv == CV and analysis == good_model_response()
 
 
 # --- documented, intentional limits of the AI-first design ---------------------------------------------------
 
-def test_limit_the_backend_cannot_correct_a_wrong_category():
-    """If the model calls remote-work comfort a Required qualification, nothing in code rejects it: the
-    exclusion rules live only in the prompt. The Phase 2 verifier would have rejected this."""
+def test_backstop_a_working_condition_scored_by_the_model_is_excluded_not_scored():
+    """Even if the model classifies remote-work comfort as Required, the backstop keeps it out of the score."""
     analysis = mutate(lambda a: a.requirements.append(
-        R('bad', 'Comfortable working remotely', 'required', 'not_shown')))
-    result = evaluate(analysis, CV)
-    assert any(r['id'] == 'bad' for r in result['requirements'])
-    assert result['score'] == 57 != 66  # the misclassification moves the score (required avg drops to 7/12)
+        R('bad', 'Comfortable working remotely', 'required', 'not_shown',
+          source_quote='Comfortable working remotely with a distributed team')))
+    result = evaluate(analysis, CV, JOB)
+    assert all(r['id'] != 'bad' for r in result['requirements'])
+    assert result['rejected'] == [{'id': 'bad', 'requirement': 'Comfortable working remotely', 'reason': 'working_condition'}]
+    assert result['score'] == 66  # unchanged
+    assert result['diagnostics']['rejected_working_condition'] == 1
+
+
+@pytest.mark.parametrize('text, quote', [
+    ('Full-time availability', 'This is a remote, full-time contract role'),
+    ('Right to work in the UK', 'This is a remote, full-time contract role'),
+])
+def test_backstop_catches_other_arrangement_and_authorization_wordings(text, quote):
+    analysis = mutate(lambda a: a.requirements.append(R('bad', text, 'required', 'not_shown', source_quote=quote)))
+    result = evaluate(analysis, CV, JOB)
+    assert all(r['id'] != 'bad' for r in result['requirements']) and result['score'] == 66
+
+
+def test_backstop_leaves_professional_skills_alone_even_when_they_sound_similar():
+    job = ('Requirements\n- Experience with remote sensing data.\n- Shift-left testing experience.\n'
+           '- Contract law knowledge.\n- Experience managing remote teams.\n')
+    reqs = [R(f'q{i}', t, 'required', 'not_shown', source_quote=t)
+            for i, t in enumerate(('Experience with remote sensing data', 'Shift-left testing experience',
+                                   'Contract law knowledge', 'Experience managing remote teams'))]
+    result = evaluate(ExperimentAnalysis(enough_info=True, overall_note='x', requirements=reqs), CV, job)
+    assert len(result['requirements']) == 4 and result['rejected'] == []
+
+
+def test_an_invented_requirement_is_rejected_because_its_quote_is_not_in_the_post():
+    analysis = mutate(lambda a: a.requirements.append(
+        R('inv', 'Kubernetes', 'required', 'not_shown', source_quote='Experience with Kubernetes clusters')))
+    result = evaluate(analysis, CV, JOB)
+    assert all(r['id'] != 'inv' for r in result['requirements'])
+    assert result['rejected'] == [{'id': 'inv', 'requirement': 'Kubernetes', 'reason': 'quote_not_in_job'}]
+    assert result['score'] == 66 and result['diagnostics']['rejected_no_job_quote'] == 1
+
+
+def test_job_quotes_fold_case_and_whitespace_but_not_paraphrase():
+    ok = mutate(lambda a: a.requirements.__setitem__(1, R(
+        'r2', 'Written documentation skills', 'required', 'demonstrated',
+        [Citation(path='experience.exp-1.bullets.1', quote='Wrote and updated a shared documentation page')],
+        source_quote='STRONG   written documentation skills')))
+    assert evaluate(ok, CV, JOB)['score'] == 66
+    paraphrased = mutate(lambda a: a.requirements.__setitem__(1, R(
+        'r2', 'Written documentation skills', 'required', 'demonstrated',
+        [Citation(path='experience.exp-1.bullets.1', quote='Wrote and updated a shared documentation page')],
+        source_quote='Good documentation writing skills')))
+    result = evaluate(paraphrased, CV, JOB)
+    assert result['diagnostics']['rejected_no_job_quote'] == 1 and result['score'] != 66
+
+
+def test_rejections_can_push_a_report_under_the_minimum_without_manufacturing_a_score():
+    reqs = [R('q1', 'Python', 'required', 'demonstrated', [Citation(path='skills', quote='Python')],
+              source_quote='Proficiency in Python or R for data analysis'),
+            R('q2', 'Kubernetes', 'required', 'not_shown', source_quote='Not a line from this post')]
+    result = evaluate(ExperimentAnalysis(enough_info=True, overall_note='x', requirements=reqs), CV, JOB)
+    assert result['score'] is None and result['scoreUnavailableReason'] == 'too_few_qualifications'
 
 
 def test_limit_an_authentic_but_irrelevant_quote_is_accepted():
-    """The mobile-app quote is verbatim and correctly cited, so this backend keeps it: relevance is judged
-    only by the model. The Phase 2/3 verifier downgrades this to not_shown."""
+    """The mobile-app quote is verbatim and correctly cited, so this backend keeps it: relevance is enforced
+    only through the model's instructions. The Phase 2/3 verifier downgrades this to not_shown."""
     analysis = mutate(lambda a: a.requirements.__setitem__(4, R(
         'r5', 'Evaluating LLM outputs or RLHF workflows', 'required', 'demonstrated',
         [Citation(path='projects.proj-2.description', quote='Built a cross-platform mobile app')],
-        'Your project work shows model evaluation.')))
-    result = evaluate(analysis, CV)
+        'Your project work shows model evaluation.',
+        source_quote='Hands-on experience evaluating LLM outputs or RLHF workflows')))
+    result = evaluate(analysis, CV, JOB)
     assert next(r for r in result['requirements'] if r['id'] == 'r5')['status'] == 'demonstrated'
     assert result['score'] == 82 != 66  # the irrelevant evidence inflates the score (required avg rises to 9/10)
