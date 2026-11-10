@@ -289,3 +289,58 @@ def build_input(job_title: str, company: str | None, job_description: str, cv_co
         f'<job_description>\n{job_description}\n</job_description>\n\n'
         f'<cv>\n{render_cv(cv_content)}\n</cv>'
     )
+
+
+# --- API report (legacy-compatible shape for the existing frontend) ---------------------------------
+
+LEGACY_STATUS = {'demonstrated': 'clearly_demonstrated', 'partial': 'partially_demonstrated',
+                 'not_shown': 'not_mentioned'}
+AI_FIRST_ANALYSIS_VERSION = 'ai-first-1'
+
+
+def _legacy_requirement(r: dict[str, Any]) -> dict[str, Any]:
+    dto = {'requirement': r['requirement'], 'status': LEGACY_STATUS[r['status']],
+           'evidence': r['explanation'], 'category': r['category']}
+    if r['category'] in ('required', 'preferred'):
+        # Standard qualifications carry no legacy importance: older clients then show no Required/Preferred tag.
+        dto['importance'] = r['category']
+    return dto
+
+
+def _score_explanation(result: dict[str, Any]) -> str:
+    if not result['scoreAvailable']:
+        return ('Not enough identifiable qualifications in this job post to score reliably. '
+                'Paste the full description, including the requirements section.')
+    counts = result['qualificationCounts']
+    total = sum(counts[c]['count'] for c in SHARES)
+    text = (f'Qualification fit {result["score"]}/100, based on {total} professional qualifications '
+            f'({counts["required"]["count"]} required, {counts["standard"]["count"]} standard, '
+            f'{counts["preferred"]["count"]} preferred). A qualification shown in your CV earns full credit, one '
+            'partly shown earns half, and one not shown earns none. Working conditions and responsibilities are '
+            'not scored.')
+    if result['scoreNote'] == 'preferred_only':
+        text += ' This post lists only preferred qualifications, so the score reflects those alone.'
+    return text
+
+
+def build_report(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text: str, model: str) -> dict[str, Any]:
+    """The stored/served report: `evaluate` plus every legacy field existing clients read."""
+    result = evaluate(analysis, cv_content, job_text)
+    groups = {'demonstrated': [], 'partial': [], 'not_shown': []}
+    for r in result['requirements']:
+        groups[r['status']].append(_legacy_requirement(r))
+    matched, partial, missing = groups['demonstrated'], groups['partial'], groups['not_shown']
+    return {
+        **result,
+        'summary': result['overallAssessment'],  # legacy field
+        'scoreExplanation': _score_explanation(result),
+        'matched': matched,
+        'partiallyMatched': partial,
+        'missing': missing,
+        'strengths': [{'skill': r['requirement'], 'evidence': r['evidence']} for r in matched],
+        'gaps': [{'skill': r['requirement'], 'tip': r['evidence']} for r in missing],
+        # The AI-first analysis produces no advice prose; the legacy lists stay present for old clients.
+        'areasToImprove': [], 'recommendations': [], 'suggestedWording': [], 'questions': [],
+        'model': model,
+        'analysisVersion': AI_FIRST_ANALYSIS_VERSION,
+    }

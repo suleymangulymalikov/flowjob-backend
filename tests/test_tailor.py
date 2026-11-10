@@ -261,11 +261,8 @@ def test_dedup_cache(client, mock_ai):
 def test_match_reuse_path(client, monkeypatch):
     # Create a match (mocked), then tailor from it without a job description.
     from app.services.ai_matching import AnalysisResult
-    from app.matches.schemas import AiAnalysis, EvidenceStatus, Importance, RequirementAssessment
-    match_analysis = AiAnalysis(enough_info=True, overall_assessment='Good fit.', requirements=[
-        RequirementAssessment(requirement='Python', importance=Importance.required,
-                              status=EvidenceStatus.clearly_demonstrated, evidence='Built APIs'),
-    ])
+    from tests.test_matches import analysis
+    match_analysis = analysis()
     monkeypatch.setattr(ai_matching, 'analyze',
                         lambda *a, **k: AnalysisResult(analysis=match_analysis, usage=Usage(10, 10), model='mock'))
     monkeypatch.setattr(ai_tailoring, 'analyze',
