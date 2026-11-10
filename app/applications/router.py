@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from beanie import PydanticObjectId
+from beanie.odm.queries.update import UpdateResponse
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -60,7 +61,7 @@ async def resolve_cv(cv_id: str | None, user: User) -> PydanticObjectId | None:
         oid = PydanticObjectId(cv_id)
     except (ValueError, TypeError, InvalidId):
         raise HTTPException(422, 'Linked CV not found')
-    if not await SavedCv.find_one(SavedCv.id == oid, SavedCv.user_id == user.id):
+    if not await SavedCv.find_one(SavedCv.id == oid, SavedCv.user_id == user.id, ignore_cache=True).exists():
         raise HTTPException(422, 'Linked CV not found')
     return oid
 
@@ -70,8 +71,8 @@ async def create_application(data: ApplicationCreate, user: CurrentUser):
     cv_oid = await resolve_cv(data.cvId, user)
     app = Application(
         user_id=user.id,
-        company=data.company.strip(),
-        job_title=data.jobTitle.strip(),
+        company=data.company,
+        job_title=data.jobTitle,
         job_url=data.jobUrl,
         location=data.location,
         work_arrangement=data.workArrangement,
@@ -142,6 +143,7 @@ _FIELD_MAP = {
     'dateApplied': 'date_applied',
     'notes': 'notes',
     'followUpDate': 'follow_up_date',
+    'cvId': 'cv_id',
 }
 
 
@@ -149,17 +151,19 @@ _FIELD_MAP = {
 async def update_application(app_id: str, data: ApplicationUpdate, user: CurrentUser):
     app = await owned(app_id, user)
     fields = data.model_dump(exclude_unset=True)
+    if not fields:
+        return present(app)
     if 'cvId' in fields:
-        app.cv_id = await resolve_cv(fields.pop('cvId'), user)
-    for key, attr in _FIELD_MAP.items():
-        if key in fields:
-            value = fields[key]
-            if isinstance(value, str) and key in ('company', 'jobTitle'):
-                value = value.strip()
-            setattr(app, attr, value)
-    app.updated_at = datetime.now(UTC)
-    await app.save()
-    return present(app)
+        fields['cvId'] = await resolve_cv(fields['cvId'], user)
+    changes = {_FIELD_MAP[key]: value for key, value in fields.items()}
+    changes['updated_at'] = datetime.now(UTC)
+    # Write only the supplied fields so history and simultaneous unrelated edits survive.
+    updated = await Application.find_one(
+        Application.id == app.id, Application.user_id == user.id, ignore_cache=True,
+    ).update({'$set': changes}, response_type=UpdateResponse.NEW_DOCUMENT)
+    if updated is None:
+        raise HTTPException(404, 'Application not found')
+    return present(updated)
 
 
 @router.delete('/applications/{app_id}', status_code=204)

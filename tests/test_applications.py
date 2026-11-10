@@ -1,5 +1,14 @@
 """Job application tracking API (authenticated, owner-scoped, MongoDB-backed)."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+from beanie import PydanticObjectId
+
+from app.applications import router as application_api
+from app.applications.models import Application
+
 BASE = '/api/v1'
 
 
@@ -139,3 +148,144 @@ def test_invalid_application_id_is_404(client):
     assert client.get(f'{BASE}/applications/not-an-id', headers=headers).status_code == 404
     assert client.patch(f'{BASE}/applications/not-an-id', headers=headers, json={'status': 'Offer'}).status_code == 404
     assert client.delete(f'{BASE}/applications/not-an-id', headers=headers).status_code == 404
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('status', None), ('company', None), ('jobTitle', None),
+    ('status', 'Bogus'), ('company', '  '), ('jobTitle', '\t'),
+])
+def test_patch_rejects_invalid_required_values_without_changing_the_record(client, field, value):
+    headers = signup(client)
+    saved = client.post(f'{BASE}/applications', headers=headers, json={
+        'company': 'Acme', 'jobTitle': 'Engineer', 'status': 'Applied', 'notes': 'Keep these notes',
+    }).json()
+    url = f"{BASE}/applications/{saved['id']}"
+    response = client.patch(url, headers=headers, json={field: value, 'notes': 'Do not write this'})
+    assert response.status_code == 422
+    assert response.json()['detail'][0]['loc'] == ['body', field]
+    got = client.get(url, headers=headers).json()
+    assert got['notes'] == saved['notes']
+    assert all(got[key] == saved[key] for key in ('company', 'jobTitle', 'status'))
+
+
+def test_patch_explicit_null_clears_optional_fields_but_omission_leaves_them_intact(client):
+    headers = signup(client)
+    cv = make_cv(client, headers)
+    optional = {
+        'jobUrl': 'example.com/jobs/1', 'location': 'Remote', 'workArrangement': 'Remote',
+        'employmentType': 'Full-time', 'dateApplied': '2025-01-10', 'notes': 'Referral',
+        'followUpDate': '2025-02-10', 'cvId': cv,
+    }
+    saved = client.post(f'{BASE}/applications', headers=headers, json={
+        'company': 'Acme', 'jobTitle': 'Engineer', 'status': 'Applied', **optional,
+    }).json()
+    url = f"{BASE}/applications/{saved['id']}"
+    partial = client.patch(url, headers=headers, json={'jobTitle': ' Senior Engineer '})
+    assert partial.status_code == 200
+    assert partial.json()['jobTitle'] == 'Senior Engineer'
+    assert {key: partial.json()[key] for key in optional} == optional
+
+    cleared = client.patch(url, headers=headers, json=dict.fromkeys(optional))
+    assert cleared.status_code == 200
+    assert {key: cleared.json()[key] for key in optional} == dict.fromkeys(optional)
+    assert cleared.json()['company'] == 'Acme' and cleared.json()['status'] == 'Applied'
+    assert client.patch(url, headers=headers, json={}).json() == cleared.json()
+
+
+def test_deleting_a_cv_preserves_the_application_and_allows_notes_replacement_and_unlink(client):
+    headers = signup(client)
+    cv_id = make_cv(client, headers)
+    fields = {
+        'company': 'Historical Employer', 'jobTitle': 'Engineer', 'status': 'Interview',
+        'jobUrl': 'example.com/jobs/one', 'dateApplied': '2025-01-10',
+        'followUpDate': '2025-02-01', 'notes': 'First interview', 'cvId': cv_id,
+    }
+    saved = client.post(f'{BASE}/applications', headers=headers, json=fields)
+    assert saved.status_code == 201
+    app_id = saved.json()['id']
+    url = f'{BASE}/applications/{app_id}'
+    before_delete = client.get(url, headers=headers).json()
+
+    assert client.delete(f'{BASE}/cvs/{cv_id}', headers=headers).status_code == 204
+    assert client.get(f'{BASE}/cvs/{cv_id}', headers=headers).status_code == 404
+    assert client.get(url, headers=headers).json() == before_delete
+    assert client.get(f'{BASE}/applications', headers=headers).json() == [before_delete]
+
+    note = 'Second interview'
+    edited = client.patch(url, headers=headers, json={'notes': note})
+    assert edited.status_code == 200
+    assert {key: edited.json()[key] for key in fields} == {**fields, 'notes': note}
+
+    other = signup(client, 'other@example.com')
+    foreign_cv = make_cv(client, other)
+    for unavailable in (cv_id, foreign_cv, 'not-an-id', str(PydanticObjectId())):
+        rejected = client.patch(url, headers=headers, json={'cvId': unavailable, 'notes': 'Do not write'})
+        assert rejected.status_code == 422 and rejected.json() == {'detail': 'Linked CV not found'}
+        assert client.get(url, headers=headers).json()['notes'] == note
+
+    replacement = make_cv(client, headers, 'Replacement')
+    linked = client.patch(url, headers=headers, json={'cvId': replacement})
+    assert linked.status_code == 200 and linked.json()['cvId'] == replacement
+    unlinked = client.patch(url, headers=headers, json={'cvId': None})
+    assert unlinked.status_code == 200 and unlinked.json()['cvId'] is None
+    assert client.get(f'{BASE}/cvs/{replacement}', headers=headers).status_code == 200
+    assert client.patch(url, headers=other, json={'cvId': foreign_cv}).status_code == 404
+
+
+def test_legacy_dangling_link_and_match_snapshot_survive_unrelated_patch(client):
+    headers = signup(client)
+    saved = client.post(f'{BASE}/applications', headers=headers, json={
+        'company': 'Archived Co', 'jobTitle': 'Analyst',
+    }).json()
+    oid = PydanticObjectId(saved['id'])
+    missing_cv = PydanticObjectId()
+    snapshot = {'jobTitle': 'Analyst', 'company': 'Archived Co', 'score': 83}
+    collection = Application.get_pymongo_collection()
+
+    async def seed():
+        await collection.update_one({'_id': oid}, {'$set': {'cv_id': missing_cv, 'match_snapshot': snapshot}})
+
+    async def read():
+        return await collection.find_one({'_id': oid})
+
+    client.portal.call(seed)
+    url = f"{BASE}/applications/{saved['id']}"
+    assert client.get(url, headers=headers).json()['cvId'] == str(missing_cv)
+    updated = client.patch(url, headers=headers, json={'notes': 'Kept for history'})
+    assert updated.status_code == 200 and updated.json()['cvId'] == str(missing_cv)
+    assert client.portal.call(read)['match_snapshot'] == snapshot
+    assert client.patch(url, headers=headers, json={'cvId': None}).json()['cvId'] is None
+    assert client.portal.call(read)['match_snapshot'] == snapshot
+
+    assert client.patch(f'{BASE}/applications/{PydanticObjectId()}', headers=headers,
+                        json={'cvId': str(missing_cv)}).status_code == 404
+
+
+def test_concurrent_partial_updates_do_not_overwrite_each_other(client, monkeypatch):
+    headers = signup(client)
+    saved = client.post(f'{BASE}/applications', headers=headers, json={
+        'company': 'Acme', 'jobTitle': 'Engineer',
+    }).json()
+    url = f"{BASE}/applications/{saved['id']}"
+    real_owned = application_api.owned
+    both_read = asyncio.Event()
+    reads = 0
+
+    async def read_together(*args):
+        nonlocal reads
+        app = await real_owned(*args)
+        reads += 1
+        if reads == 2:
+            both_read.set()
+        await asyncio.wait_for(both_read.wait(), timeout=5)
+        return app
+
+    with monkeypatch.context() as patch:
+        patch.setattr(application_api, 'owned', read_together)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(client.patch, url, headers=headers, json={'status': 'Interview'})
+            second = pool.submit(client.patch, url, headers=headers, json={'notes': 'Call scheduled'})
+            assert first.result(timeout=10).status_code == second.result(timeout=10).status_code == 200
+
+    final = client.get(url, headers=headers).json()
+    assert final['status'] == 'Interview' and final['notes'] == 'Call scheduled'
