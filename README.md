@@ -80,3 +80,27 @@ Workers share the quota through MongoDB and coalesce requests within each
 process. Deploy the same quota implementation to all workers. A process crash
 or a database outage that prevents settlement can leave a charge for that UTC
 day, including when the provider outcome is unknown.
+
+## CV payload and PDF limits
+
+CV create, update, and unsaved-preview requests accept typed browser CV
+sections. Sections and their fields can be omitted. Dates, locations, phone
+numbers, and languages remain free-form strings. Newly supplied contact links
+with active schemes or embedded credentials are rejected. A saved CV's own
+historical link text can still be carried forward unchanged and is rendered
+inert whenever it is unsafe. Legacy records are projected into the browser CV
+shape on read without updating storage or changing their source revision.
+
+The request limit is 256 KiB before parsing. Normalized content is limited to
+64 KiB of UTF-8 JSON and 600 experience, education, project, and bullet items
+combined. A CV can have up to 100 items per main section, 40 bullets per job,
+200 skills and 24 links. For example, summaries can contain 8,000 characters
+and bullets can contain 2,000. The API returns 413 for a body over the wire
+limit and 422 for invalid fields or over-budget content.
+
+The Harvard template can still render multi-page CVs. Rendering tries at most
+five font and margin combinations, skips the intermediate attempts when the
+smallest layout still spans pages, and caps output at 16 pages. WeasyPrint
+cannot fetch external resources. Saved CVs, unsaved previews and legacy PDF
+downloads share two active render slots per backend worker. Additional PDF
+requests receive 503 and a short Retry-After header.

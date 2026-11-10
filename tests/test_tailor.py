@@ -342,7 +342,8 @@ def test_identical_cvs_do_not_share_drafts_and_cannot_swap_sources(client, mock_
     payload = {'tailorDraftId': a['id'], 'content': content, 'kind': 'tailored', 'sourceCvId': cv_b}
     assert client.post(f'{BASE}/cvs', headers=h, json=payload).status_code == 422
     other = signup(client, 'other@example.com')
-    assert client.post(f'{BASE}/cvs/preview/pdf', headers=other, json=payload).status_code == 404
+    preview = {'tailorDraftId': a['id'], 'content': content}
+    assert client.post(f'{BASE}/cvs/preview/pdf', headers=other, json=preview).status_code == 404
     assert client.post(f'{BASE}/cvs', headers=other, json=payload).status_code == 404
 
 

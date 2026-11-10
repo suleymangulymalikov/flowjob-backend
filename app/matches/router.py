@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
 from app.config import settings
+from app.cv.http import checked_saved_content
 from app.cv.revision import content_revision
 from app.integration.models import SavedCv
 from app.matches.models import MatchRecord
@@ -152,7 +153,7 @@ async def create_match(data: CreateMatch, user: CurrentUser):
         raise HTTPException(422, 'That job description is too long; please shorten it.')
 
     cv = await owned_cv(data.cvId, user)
-    evidence = cv_evidence(cv.content)
+    evidence = cv_evidence(checked_saved_content(cv.content))
     cv_hash = _sha(evidence)
     revision = content_revision(cv.content)
     job_title = data.jobTitle.strip()

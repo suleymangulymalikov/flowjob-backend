@@ -21,10 +21,10 @@ async def owned_draft(draft_id: str, user: User) -> TailorDraft:
     return draft
 
 
-async def require_current_draft(draft_id: str, user: User) -> TailorDraft:
+async def require_current_draft(draft_id: str, user: User) -> tuple[TailorDraft, SavedCv]:
     draft = await owned_draft(draft_id, user)
     if draft.source_cv_revision:
         source = await SavedCv.find_one(SavedCv.id == draft.source_cv_id, SavedCv.user_id == user.id)
         if source and content_revision(source.content) == draft.source_cv_revision:
-            return draft
+            return draft, source
     raise HTTPException(409, 'The source CV for this draft could not be verified. Start a new tailoring draft.')

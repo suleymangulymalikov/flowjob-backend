@@ -5,21 +5,25 @@ NOT stubbed: they return 404 until implemented, rather than fake success.
 """
 import re
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
-from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ValidationError
 from pymongo.errors import DuplicateKeyError
 
 from app.auth.dependencies import get_current_user
-from app.cv.render import render_saved_cv_pdf
 from app.auth.models import RefreshToken
 from app.auth.router import issue_tokens
 from app.auth.security import hash_password, hash_refresh_token, verify_password
 from app.config import settings
+from app.cv.content import (
+    CvContent, CvCreateInput, CvPreviewInput, CvWriteInput,
+    has_new_unsafe_links, read_cv_content, unsafe_contact_link,
+)
+from app.cv.http import CvPayloadRoute, checked_saved_content, render_pdf
+from app.cv.render import render_saved_cv_pdf
 from app.cv.revision import content_revision
 from app.integration.models import SavedCv
 from app.profiles.models import Profile
@@ -28,6 +32,7 @@ from app.tailor.drafts import require_current_draft
 from app.users.models import User
 
 router = APIRouter(prefix='/api/v1', tags=['frontend'])
+cv_payload_router = APIRouter(route_class=CvPayloadRoute)
 CurrentUser = Annotated[User, Depends(get_current_user)]
 COOKIE = 'flowjob_refresh'
 
@@ -185,22 +190,12 @@ async def save_profile(data: UIProfile, user: CurrentUser):
 
 def present_cv(cv: SavedCv) -> dict[str, Any]:
     data: dict[str, Any] = {'id': str(cv.id), 'name': cv.name, 'kind': cv.kind,
-        'createdAt': cv.created_at.isoformat(), 'updatedAt': cv.updated_at.isoformat(), 'content': cv.content}
+        'createdAt': cv.created_at.isoformat(), 'updatedAt': cv.updated_at.isoformat(), 'content': read_cv_content(cv.content)}
     if cv.job_title: data['jobTitle'] = cv.job_title
     if cv.company: data['company'] = cv.company
     if cv.match_id: data['matchId'] = cv.match_id
     if cv.source_cv_id: data['sourceCvId'] = cv.source_cv_id
     return data
-
-
-class CVInput(BaseModel):
-    name: str | None = None
-    kind: Literal['original', 'tailored'] | None = None
-    jobTitle: str | None = None
-    company: str | None = None
-    matchId: str | None = None
-    sourceCvId: str | None = None
-    content: dict[str, Any] | None = None
 
 
 async def owned_cv(cv_id: str, user: User) -> SavedCv:
@@ -219,19 +214,34 @@ async def cvs(user: CurrentUser):
     return [present_cv(c) for c in await SavedCv.find(SavedCv.user_id == user.id).to_list()]
 
 
-class CVCreateInput(CVInput):
-    tailorDraftId: str | None = None
+def reject_new_unsafe_links(content: CvContent, inherited: dict | None = None) -> None:
+    original_links = inherited.get('links') if inherited else None
+    if has_new_unsafe_links(content.links, original_links):
+        raise HTTPException(422, 'Contact links cannot use unsafe URL schemes or include credentials.')
 
 
-@router.post('/cvs', status_code=201)
-async def create_cv(data: CVCreateInput, user: CurrentUser):
+@cv_payload_router.post('/cvs', status_code=201)
+async def create_cv(data: CvCreateInput, user: CurrentUser):
+    source_content = None
     if data.tailorDraftId is not None:
-        draft = await require_current_draft(data.tailorDraftId, user)
+        draft, source = await require_current_draft(data.tailorDraftId, user)
         if data.kind != 'tailored' or data.sourceCvId != str(draft.source_cv_id):
             raise HTTPException(422, 'The tailored CV must use the source CV of the draft.')
-        if not data.content:
+        if data.content is None or not data.content.model_fields_set:
             raise HTTPException(422, 'Provide the reviewed CV content.')
-    content = data.content or (await read_profile(user))
+        source_content = source.content
+    if data.content is not None and data.content.model_fields_set:
+        reject_new_unsafe_links(data.content, source_content)
+        content = data.content.model_dump(exclude_unset=True)
+    else:
+        # The browser omits content when creating a CV from the profile.
+        # Validate the snapshot before creating a new record.
+        try:
+            snapshot = CvContent.model_validate(await read_profile(user))
+        except ValidationError:
+            raise HTTPException(422, 'Your profile exceeds the supported CV limits or contains invalid text. Edit it and try again.') from None
+        reject_new_unsafe_links(snapshot)
+        content = snapshot.model_dump(exclude_unset=True)
     cv = SavedCv(user_id=user.id, name=data.name or 'Original CV', kind=data.kind or 'original',
                  job_title=data.jobTitle, company=data.company, match_id=data.matchId,
                  source_cv_id=data.sourceCvId, content=content)
@@ -245,15 +255,22 @@ async def get_cv(cv_id: str, user: CurrentUser):
     return {**present_cv(cv), 'contentRevision': content_revision(cv.content)}
 
 
-@router.put('/cvs/{cv_id}')
-async def update_cv(cv_id: str, data: CVInput, user: CurrentUser):
+@cv_payload_router.put('/cvs/{cv_id}')
+async def update_cv(cv_id: str, data: CvWriteInput, user: CurrentUser):
     cv = await owned_cv(cv_id, user)
-    for attr, value in [('name', data.name), ('kind', data.kind), ('job_title', data.jobTitle),
-                        ('company', data.company), ('match_id', data.matchId), ('content', data.content)]:
-        if value is not None:
-            setattr(cv, attr, value)
-    cv.updated_at = datetime.now(UTC)
-    await cv.save()
+    fields = {
+        attr: value for attr, value in [
+            ('name', data.name), ('kind', data.kind), ('job_title', data.jobTitle),
+            ('company', data.company), ('match_id', data.matchId),
+        ] if value is not None
+    }
+    if data.content is not None:
+        reject_new_unsafe_links(data.content, cv.content)
+        submitted = data.content.model_dump(exclude_unset=True)
+        if read_cv_content(submitted) != read_cv_content(cv.content):
+            fields['content'] = submitted
+    fields['updated_at'] = datetime.now(UTC)
+    await cv.update({'$set': fields})
     return present_cv(cv)
 
 
@@ -271,11 +288,10 @@ async def saved_cv_pdf(cv_id: str, user: CurrentUser) -> Response:
     backs both the browser preview and the download.
     """
     cv = await owned_cv(cv_id, user)
-    content = cv.content or {}
-    name = str(content.get('fullName') or user.full_name)
-    email = str(content.get('email') or user.email)
-    # PDF rendering is CPU-bound, so run it off the event loop.
-    pdf = await run_in_threadpool(render_saved_cv_pdf, name, email, content)
+    content = checked_saved_content(cv.content)
+    name = content['fullName'] or user.full_name
+    email = content['email'] or user.email
+    pdf = await render_pdf(render_saved_cv_pdf, name, email, content)
     safe = re.sub(r'[^A-Za-z0-9._-]+', '_', cv.name).strip('_') or 'CV'
     return Response(
         pdf,
@@ -284,26 +300,25 @@ async def saved_cv_pdf(cv_id: str, user: CurrentUser) -> Response:
     )
 
 
-class PreviewInput(BaseModel):
-    tailorDraftId: str | None = None
-    content: dict[str, Any] = Field(default_factory=dict)
-
-
-@router.post('/cvs/preview/pdf', response_class=Response,
-             responses={200: {'content': {'application/pdf': {}}}})
-async def preview_cv_pdf(data: PreviewInput, user: CurrentUser) -> Response:
-    """Render arbitrary (unsaved) CV content for the live builder preview.
-
-    Tailoring previews additionally verify their source draft. No records are written.
-    """
+@cv_payload_router.post('/cvs/preview/pdf', response_class=Response,
+                        responses={200: {'content': {'application/pdf': {}}}})
+async def preview_cv_pdf(data: CvPreviewInput, user: CurrentUser) -> Response:
+    """Render unsaved content and verify source drafts without writing records."""
+    source = None
     if data.tailorDraftId is not None:
-        await require_current_draft(data.tailorDraftId, user)
-    content = data.content or {}
-    name = str(content.get('fullName') or user.full_name)
-    email = str(content.get('email') or user.email)
-    pdf = await run_in_threadpool(render_saved_cv_pdf, name, email, content)
+        _, source = await require_current_draft(data.tailorDraftId, user)
+    elif data.cvId is not None and any(unsafe_contact_link(link) for link in data.content.links):
+        source = await owned_cv(data.cvId, user)
+    reject_new_unsafe_links(data.content, source.content if source else None)
+    content = data.content.model_dump()
+    name = content['fullName'] or user.full_name
+    email = content['email'] or user.email
+    pdf = await render_pdf(render_saved_cv_pdf, name, email, content)
     return Response(pdf, media_type='application/pdf',
                     headers={'Content-Disposition': 'inline; filename="preview.pdf"'})
+
+
+router.include_router(cv_payload_router)
 
 
 class MeUpdate(BaseModel):

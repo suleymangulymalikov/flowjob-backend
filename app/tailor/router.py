@@ -14,6 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
 from app.config import settings
+from app.cv.http import checked_saved_content
 from app.cv.revision import content_revision
 from app.integration.models import SavedCv
 from app.matches.models import MatchRecord
@@ -163,7 +164,8 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
         job_url = data.jobUrl
         job_context = job
 
-    sections = cv_sections(cv.content)
+    content = checked_saved_content(cv.content)
+    sections = cv_sections(content)
     if not sections.strip():
         raise HTTPException(422, 'This CV has no content to tailor yet.')
     cv_hash = _sha(sections)
@@ -194,14 +196,14 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
             suggestions = []
             seen_targets = set()
             for i, change in enumerate(analysis.changes):
-                original = target_text(cv.content, change)
+                original = target_text(content, change)
                 target = (change.section, change.experience_id, change.bullet_index, change.project_id)
                 if not original or not original.strip() or change.original.strip() != original.strip():
                     continue
                 if not change.suggested.strip() or target in seen_targets:
                     continue
                 seen_targets.add(target)
-                review_required = change.review_required or not safe_to_auto_apply(change, original, cv.content)
+                review_required = change.review_required or not safe_to_auto_apply(change, original, content)
                 suggestions.append(_suggestion_dto(change, i, original, review_required))
 
             draft = TailorDraft(
