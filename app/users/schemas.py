@@ -1,25 +1,27 @@
 from datetime import datetime
 
 from beanie import PydanticObjectId
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr
+
+from app.auth.inputs import AccountName, ExistingPassword, NewPassword
 
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8)
-    full_name: str = Field(min_length=1)
+    password: NewPassword
+    full_name: AccountName
 
 
 class UserUpdate(BaseModel):
-    full_name: str | None = Field(default=None, min_length=1)
+    full_name: AccountName | None = None
     email: EmailStr | None = None
     # Required only when changing the email.
-    current_password: str | None = None
+    current_password: ExistingPassword | None = None
 
 
 class PasswordChange(BaseModel):
-    current_password: str
-    new_password: str = Field(min_length=8)
+    current_password: ExistingPassword
+    new_password: NewPassword
 
 
 class UserRead(BaseModel):

@@ -104,3 +104,35 @@ smallest layout still spans pages, and caps output at 16 pages. WeasyPrint
 cannot fetch external resources. Saved CVs, unsaved previews and legacy PDF
 downloads share two active render slots per backend worker. Additional PDF
 requests receive 503 and a short Retry-After header.
+
+## Authentication and deployment
+
+Browser and legacy authentication share MongoDB fixed windows of 15 minutes.
+Login allows 40 attempts per IPv4 address or IPv6 /64 and 10 per normalized
+email address. Registration allows 12 attempts per network. The limits count
+validated submissions, including successes, and return 429 with Retry-After.
+The MongoDB user needs permission to create the TTL index for the
+`auth_rate_limits` collection. The collection stores keyed digests and
+attempt counts. All workers must use the same JWT signing secret and database
+to enforce the same limits.
+
+Keep the frontend and the browser API on the same site in production. Serve
+them over HTTPS and set `COOKIE_SECURE=true` in the backend environment,
+including when a proxy terminates TLS. The refresh cookie is host-only,
+HttpOnly and SameSite=Lax. HTTPS requests always set Secure. Local HTTP
+development works with `COOKIE_SECURE=false`. If using a reverse proxy,
+configure Uvicorn's `--forwarded-allow-ips` to trust only that proxy. The proxy
+must set the client address from the real connection. FlowJob uses the ASGI
+client address and does not parse client-supplied forwarding headers.
+
+Authentication payloads are capped at 16 KiB. New passwords use 8–256 Unicode
+characters without control characters. Login and current-password checks
+allow existing passwords up to 1,024 Unicode characters without rehashing
+stored credentials. Each backend worker runs up to four Argon2 operations at
+a time off the event loop.
+
+Refresh tokens remain single-use. Logout revokes the current refresh token.
+An access JWT already issued remains valid until its expiry, 15 minutes by
+default. The browser shares refresh work within its current tab and waits for
+an in-flight refresh before sending logout so the rotated cookie can be
+revoked.

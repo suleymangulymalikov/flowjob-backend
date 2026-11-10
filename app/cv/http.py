@@ -6,55 +6,20 @@ from collections.abc import Callable
 from typing import Any
 
 from anyio import CapacityLimiter, WouldBlock
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
 from pydantic import ValidationError
 
 from app.cv.content import MAX_CV_BODY_BYTES, CvContent, CvWorkloadError, read_cv_content
+from app.request_limits import BoundedPayloadRoute
 
 _log = logging.getLogger(__name__)
 _pdf_slots = CapacityLimiter(2)
 
 
-class CvPayloadRoute(APIRoute):
-    def get_route_handler(self):
-        handler = super().get_route_handler()
-
-        async def bounded(request: Request):
-            size = 0
-            too_large = HTTPException(413, 'CV request is too large. The limit is 256 KiB.')
-            length = request.headers.get('content-length')
-            if length is not None:
-                try:
-                    size_hint = int(length)
-                except ValueError:
-                    raise HTTPException(400, 'Invalid Content-Length.') from None
-                if size_hint > MAX_CV_BODY_BYTES:
-                    raise too_large
-
-            async def receive():
-                nonlocal size
-                message = await request.receive()
-                size += len(message.get('body', b''))
-                if size > MAX_CV_BODY_BYTES:
-                    raise too_large
-                return message
-
-            try:
-                return await handler(Request(request.scope, receive))
-            except RequestValidationError as error:
-                # Return actionable locations without echoing private CV text or arbitrary keys.
-                details = [
-                    {'loc': item['loc'][:-1] if item['type'] == 'extra_forbidden' else item['loc'],
-                     'msg': item['msg'], 'type': item['type']}
-                    for item in error.errors()[:12]
-                ]
-                return JSONResponse(status_code=422, content={'detail': details})
-
-        return bounded
+class CvPayloadRoute(BoundedPayloadRoute):
+    max_body_bytes = MAX_CV_BODY_BYTES
+    body_limit_message = 'CV request is too large. The limit is 256 KiB.'
 
 
 def checked_saved_content(raw: dict) -> dict:
