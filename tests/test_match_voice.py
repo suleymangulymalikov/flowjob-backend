@@ -3,7 +3,7 @@ import re
 
 from beanie import PydanticObjectId
 
-from app.experiment.matching import SYSTEM_PROMPT
+from app.ai_matching.matching import SYSTEM_PROMPT
 from app.matches.models import MatchRecord
 from app.services import ai_matching
 from tests.test_matches import BASE, JOB, make_cv, mock_ai, signup  # noqa: F401  (mock_ai is a fixture)
@@ -14,7 +14,7 @@ ABSENCE = re.compile(r"\b(you lack|you do not have|you don't have|you are missin
 
 def test_prompt_is_the_approved_ai_first_prompt_and_keeps_scoring_out_of_the_model():
     p = SYSTEM_PROMPT
-    assert ai_matching.SYSTEM_PROMPT is p  # the service uses the experiment prompt verbatim
+    assert ai_matching.SYSTEM_PROMPT is p  # the service uses the AI-first matching prompt verbatim
     for phrase in ('untrusted DATA', 'NEVER working conditions', 'never extra requirements',
                    'NOT evidence just because it is authentic', 'never guess, never invent',
                    'Not shown in your CV.', 'Do NOT output a numeric score',

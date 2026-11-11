@@ -13,7 +13,7 @@ from app.config import settings
 from app.cv.http import checked_saved_content
 from app.cv.revision import content_revision
 from app.integration.models import SavedCv
-from app.experiment.matching import build_report, render_cv
+from app.ai_matching.matching import build_report, render_cv
 from app.matches.models import MatchRecord
 from app.matches.schemas import CreateMatch
 from app.services import ai_matching

@@ -1,7 +1,7 @@
-"""AI-first Job Matching experiment: deterministic tests with synthetic fixtures and mocked AI responses.
+"""AI-first Job Matching pipeline: deterministic tests with synthetic fixtures and mocked AI responses.
 
 No network, no paid calls, no database writes: `evaluate` is pure. The "AI responses" below are hand-written
-`ExperimentAnalysis` objects — both a well-behaved model following the finalized rules on a RemoExperts-style
+`MatchAnalysis` objects — both a well-behaved model following the finalized rules on a RemoExperts-style
 post, and misbehaving ones, to show exactly what this minimal backend does and does not catch.
 """
 import copy
@@ -9,8 +9,8 @@ from fractions import Fraction
 
 import pytest
 
-from app.experiment.matching import (
-    MIN_QUALIFICATIONS, NOT_SHOWN_TEXT, SHARES, SYSTEM_PROMPT, Citation, ExcludedItem, ExperimentAnalysis,
+from app.ai_matching.matching import (
+    MIN_QUALIFICATIONS, NOT_SHOWN_TEXT, SHARES, SYSTEM_PROMPT, Citation, ExcludedItem, MatchAnalysis,
     Requirement, build_input, evaluate, render_cv, valid_citation, verdict_for,
 )
 
@@ -72,7 +72,7 @@ def R(id, text, category, status, evidence=(), explanation=None, source_quote=No
 
 def good_model_response():
     """What a model following the finalized rules returns for JOB + CV."""
-    return ExperimentAnalysis(
+    return MatchAnalysis(
         enough_info=True,
         overall_note='Your CV clearly shows annotation QA and documentation work; LLM evaluation is the biggest gap.',
         requirements=[
@@ -201,7 +201,7 @@ def test_malformed_output_is_rejected_by_the_schema():
                                                                      'explanation': 'x'}]},  # no source_quote
     ):
         with pytest.raises(Exception):
-            ExperimentAnalysis.model_validate(bad)
+            MatchAnalysis.model_validate(bad)
 
 
 # --- scoring rules ----------------------------------------------------------------------------------------
@@ -218,7 +218,7 @@ def counts_analysis(**categories):
             status = {'D': 'demonstrated', 'P': 'partial', 'N': 'not_shown'}[ch]
             evidence = [Citation(path='skills', quote='Python')] if status != 'not_shown' else []
             reqs.append(R(f'q{i}', f'Req {i}', category, status, evidence))
-    return ExperimentAnalysis(enough_info=True, overall_note='x', requirements=reqs)
+    return MatchAnalysis(enough_info=True, overall_note='x', requirements=reqs)
 
 
 @pytest.mark.parametrize('spec, expected', [
@@ -251,7 +251,7 @@ def test_fewer_than_two_qualifications_or_insufficient_info_gives_no_score():
 
 
 def test_unverifiable_citations_can_push_a_report_under_the_minimum_without_manufacturing_a_score():
-    analysis = ExperimentAnalysis(enough_info=True, overall_note='x', requirements=[
+    analysis = MatchAnalysis(enough_info=True, overall_note='x', requirements=[
         R('q1', 'Python', 'required', 'demonstrated', [Citation(path='skills', quote='Python')],
           source_quote='Proficiency in Python'),
     ])
@@ -342,7 +342,7 @@ def test_backstop_leaves_professional_skills_alone_even_when_they_sound_similar(
     reqs = [R(f'q{i}', t, 'required', 'not_shown', source_quote=t)
             for i, t in enumerate(('Experience with remote sensing data', 'Shift-left testing experience',
                                    'Contract law knowledge', 'Experience managing remote teams'))]
-    result = evaluate(ExperimentAnalysis(enough_info=True, overall_note='x', requirements=reqs), CV, job)
+    result = evaluate(MatchAnalysis(enough_info=True, overall_note='x', requirements=reqs), CV, job)
     assert len(result['requirements']) == 4 and result['rejected'] == []
 
 
@@ -374,7 +374,7 @@ def test_rejections_can_push_a_report_under_the_minimum_without_manufacturing_a_
     reqs = [R('q1', 'Python', 'required', 'demonstrated', [Citation(path='skills', quote='Python')],
               source_quote='Proficiency in Python or R for data analysis'),
             R('q2', 'Kubernetes', 'required', 'not_shown', source_quote='Not a line from this post')]
-    result = evaluate(ExperimentAnalysis(enough_info=True, overall_note='x', requirements=reqs), CV, JOB)
+    result = evaluate(MatchAnalysis(enough_info=True, overall_note='x', requirements=reqs), CV, JOB)
     assert result['score'] is None and result['scoreUnavailableReason'] == 'too_few_qualifications'
 
 
@@ -401,24 +401,24 @@ def test_limit_an_authentic_but_irrelevant_quote_is_accepted():
     ('[projects.proj-1.tech]', 'Built a Power BI dashboard', 'projects.proj-1.description'),
 ])
 def test_a_quote_cited_under_the_wrong_field_moves_to_the_one_matching_field_of_the_same_entry(path, quote, resolved):
-    from app.experiment.matching import resolve_citation
+    from app.ai_matching.matching import resolve_citation
     assert resolve_citation(CV, Citation(path=path, quote=quote)) == resolved
 
 
 def test_a_correctly_cited_path_is_never_rewritten():
-    from app.experiment.matching import resolve_citation
+    from app.ai_matching.matching import resolve_citation
     assert resolve_citation(CV, Citation(path='projects.proj-1.tech', quote='Power BI')) == 'projects.proj-1.tech'
 
 
 def test_an_ambiguous_wrong_field_quote_is_rejected_not_guessed():
-    from app.experiment.matching import resolve_citation
+    from app.ai_matching.matching import resolve_citation
     # "Power BI" appears in BOTH the tech and description of proj-1; cited under .name it matches two fields.
     assert resolve_citation(CV, Citation(path='projects.proj-1.name', quote='Power BI')) is None
 
 
 @pytest.mark.parametrize('path', ['summary', 'skills', 'languages', 'links.0'])
 def test_top_level_items_have_no_sibling_fields_to_resolve_to(path):
-    from app.experiment.matching import resolve_citation
+    from app.ai_matching.matching import resolve_citation
     assert resolve_citation(CV, Citation(path=path, quote='Built a Power BI dashboard')) is None
 
 
@@ -477,7 +477,7 @@ POWER_BI_LINE = 'Experience building dashboards in Power BI'
     f'NICE TO HAVE\n{POWER_BI_LINE}',
 ])
 def test_harmless_formatting_differences_in_a_job_quote_are_accepted(quote):
-    from app.experiment.matching import quote_in_job
+    from app.ai_matching.matching import quote_in_job
     assert quote_in_job(JOB, quote)
 
 
@@ -493,7 +493,7 @@ def test_harmless_formatting_differences_in_a_job_quote_are_accepted(quote):
     '',
 ])
 def test_paraphrases_invented_text_and_multiple_lines_are_still_rejected(quote):
-    from app.experiment.matching import quote_in_job
+    from app.ai_matching.matching import quote_in_job
     assert not quote_in_job(JOB, quote)
 
 

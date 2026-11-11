@@ -1,8 +1,5 @@
 """AI-first Job Matching: the contract, prompt, verification and deterministic scoring (also reused by Tailoring).
 
-The package keeps its original name, `app.experiment`; a rename to a permanent package name is a pending, purely mechanical
-follow-up.
-
 Division of labour
 ------------------
 The MODEL interprets language. The finalized product rules live in its prompt, not in code:
@@ -40,7 +37,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-EXPERIMENT_PROMPT_VERSION = 'exp-1'
+MATCH_PROMPT_VERSION = 'exp-1'
 
 SYSTEM_PROMPT = (
     'You are a careful, professional career assistant. You read a job post and the CV of the person who '
@@ -118,7 +115,7 @@ class ExcludedItem(BaseModel):
     reason: Literal['working_condition', 'personality_trait', 'job_duty', 'other']
 
 
-class ExperimentAnalysis(BaseModel):
+class MatchAnalysis(BaseModel):
     enough_info: bool
     requirements: list[Requirement] = Field(default_factory=list, max_length=25)
     excluded: list[ExcludedItem] = Field(default_factory=list, max_length=10)
@@ -277,7 +274,7 @@ def summarize(requirements: list[dict[str, Any]], scored: bool) -> str:
     return ' '.join(parts)
 
 
-def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text: str) -> dict[str, Any]:
+def evaluate(analysis: MatchAnalysis, cv_content: dict[str, Any], job_text: str) -> dict[str, Any]:
     """Verify job quotes, apply the condition backstop, validate CV citations, compute the score. Pure."""
     requirements: list[dict[str, Any]] = []
     rejected: list[dict[str, str]] = []  # {id, requirement, reason, quote}: short claimed quote, never the job text
@@ -366,7 +363,7 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text:
         'excluded': [e.model_dump() for e in analysis.excluded],
         'rejected': rejected,  # proposals the backend refused to score
         'diagnostics': {**diagnostics, 'droppedCitations': dropped},
-        'promptVersion': EXPERIMENT_PROMPT_VERSION,
+        'promptVersion': MATCH_PROMPT_VERSION,
     }
 
 
@@ -413,7 +410,7 @@ def _score_explanation(result: dict[str, Any]) -> str:
     return text
 
 
-def build_report(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text: str, model: str) -> dict[str, Any]:
+def build_report(analysis: MatchAnalysis, cv_content: dict[str, Any], job_text: str, model: str) -> dict[str, Any]:
     """The stored/served report: `evaluate` plus every legacy field existing clients read."""
     result = evaluate(analysis, cv_content, job_text)
     groups = {'demonstrated': [], 'partial': [], 'not_shown': []}

@@ -1,6 +1,6 @@
 """Focused integration tests: the AI-first pipeline behind the existing Job Match API."""
 from app.config import settings
-from app.experiment.matching import Citation
+from app.ai_matching.matching import Citation
 from app.services import ai_matching
 from app.services.ai_matching import AnalysisResult, Usage
 from tests.test_matches import BASE, JOB, analysis, make_cv, mock_ai, req, signup  # noqa: F401
@@ -78,23 +78,23 @@ def test_quota_refund_and_cache_still_hold_with_the_new_pipeline(client, monkeyp
 
 
 def test_match_generation_uses_the_larger_budget_longer_timeout_and_zero_temperature(monkeypatch):
-    from app.experiment.matching import ExperimentAnalysis
+    from app.ai_matching.matching import MatchAnalysis
     seen = {}
 
     def fake_request(system, user, schema, **kwargs):
         seen.update(schema=schema, **kwargs)
-        return ExperimentAnalysis(enough_info=False), Usage(1, 1)
+        return MatchAnalysis(enough_info=False), Usage(1, 1)
 
     monkeypatch.setattr(settings, 'openai_api_key', 'synthetic-key')
     monkeypatch.setattr(ai_matching, 'request_analysis', fake_request)
     ai_matching.analyze('Dev', None, JOB, {'skills': ['Python']})
-    assert seen == {'schema': ExperimentAnalysis, 'max_output_tokens': 3000, 'timeout': 60.0, 'temperature': 0.0}
+    assert seen == {'schema': MatchAnalysis, 'max_output_tokens': 3000, 'timeout': 60.0, 'temperature': 0.0}
 
 
 def test_a_model_that_rejects_temperature_is_retried_once_without_it(monkeypatch):
     import httpx
     import openai
-    from app.experiment.matching import ExperimentAnalysis
+    from app.ai_matching.matching import MatchAnalysis
     bodies = []
 
     def respond(request):
@@ -103,7 +103,7 @@ def test_a_model_that_rejects_temperature_is_retried_once_without_it(monkeypatch
         bodies.append(body)
         if 'temperature' in body:
             return httpx.Response(400, json={'error': {'message': "Unsupported parameter: 'temperature'", 'type': 'invalid_request_error'}})
-        text = ExperimentAnalysis(enough_info=False).model_dump_json()
+        text = MatchAnalysis(enough_info=False).model_dump_json()
         return httpx.Response(200, json={
             'id': 'r', 'object': 'response', 'model': 'gpt-4o-mini', 'status': 'completed',
             'output': [{'type': 'message', 'id': 'm', 'role': 'assistant', 'status': 'completed',

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.experiment.matching import Citation, _fold, _items, resolve_citation
+from app.ai_matching.matching import Citation, _fold, _items, resolve_citation
 from app.tailor.schemas import ProposedChange
 
 _BULLET_PATH = re.compile(r'^experience\.(?P<id>.+)\.bullets\.(?P<n>\d+)$')

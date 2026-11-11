@@ -1,4 +1,4 @@
-"""OpenAI job-matching service on the AI-first contract (app/experiment/matching.py).
+"""OpenAI job-matching service on the AI-first contract (app/ai_matching/matching.py).
 
 The model interprets the job post and CV under the rules in its prompt; the backend verifies job quotes
 and CV citations and computes the score deterministically. All OpenAI-specific logic lives here so the
@@ -16,18 +16,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.experiment.matching import (
-    EXPERIMENT_PROMPT_VERSION, NOT_SHOWN_TEXT, SYSTEM_PROMPT, Citation, ExcludedItem, ExperimentAnalysis,
+from app.ai_matching.matching import (
+    MATCH_PROMPT_VERSION, NOT_SHOWN_TEXT, SYSTEM_PROMPT, Citation, ExcludedItem, MatchAnalysis,
     Requirement, build_input,
 )
 from app.services.ai_provider import Usage, request_analysis
 
-PROMPT_VERSION = f'ai-first-{EXPERIMENT_PROMPT_VERSION}'
+PROMPT_VERSION = f'ai-first-{MATCH_PROMPT_VERSION}'
 
 
 @dataclass
 class AnalysisResult:
-    analysis: ExperimentAnalysis
+    analysis: MatchAnalysis
     usage: Usage
     model: str
     prompt_version: str = PROMPT_VERSION
@@ -39,7 +39,7 @@ def _mock_result() -> AnalysisResult:
     Its citations are checked against the real CV like any model output, so with a CV that does not list
     Python/MongoDB the claims degrade honestly to not_shown instead of inventing evidence.
     """
-    analysis = ExperimentAnalysis(
+    analysis = MatchAnalysis(
         enough_info=True,
         requirements=[
             Requirement(id='r1', requirement='Python', category='required', source_quote='Python',
@@ -67,7 +67,7 @@ def analyze(job_title: str, company: str | None, job_description: str, cv_conten
 
     user_input = build_input(job_title, company, job_description, cv_content)
     parsed, usage = request_analysis(
-        SYSTEM_PROMPT, user_input, ExperimentAnalysis,
+        SYSTEM_PROMPT, user_input, MatchAnalysis,
         max_output_tokens=settings.match_max_output_tokens,
         timeout=settings.match_timeout_seconds,
         temperature=settings.match_temperature,

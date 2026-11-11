@@ -24,7 +24,7 @@ from app.services.ai_cache import cache_model, coalesce_request, job_fingerprint
 from app.services.ai_provider import AiError, error_response, estimate_cost_usd
 from app.services.ai_quota import generation_quota
 from app.tailor.drafts import owned_draft
-from app.experiment.matching import render_cv
+from app.ai_matching.matching import render_cv
 from app.tailor.grounding import MAX_ADDED_SKILLS, ground
 from app.tailor.models import TailorDraft
 from app.tailor.schemas import (

@@ -8,7 +8,7 @@ from beanie import PydanticObjectId
 from app.config import settings
 from app.matches import router as matches_router
 from app.matches.models import MatchRecord
-from app.experiment.matching import Citation, ExperimentAnalysis, Requirement, render_cv
+from app.ai_matching.matching import Citation, MatchAnalysis, Requirement, render_cv
 from app.services import ai_matching, ai_provider, ai_tailoring
 from app.services.ai_matching import AnalysisResult
 from app.services.ai_provider import Usage
@@ -56,7 +56,7 @@ def analysis(enough=True, reqs=None):
             req('r2', 'MongoDB', 'required', 'demonstrated', [Citation(path='skills', quote='MongoDB')]),
             req('r3', 'Docker', 'preferred', 'not_shown'),
         ]
-    return ExperimentAnalysis(enough_info=enough, overall_note='Your CV shows solid backend alignment.',
+    return MatchAnalysis(enough_info=enough, overall_note='Your CV shows solid backend alignment.',
                               requirements=reqs)
 
 
