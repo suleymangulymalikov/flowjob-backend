@@ -109,7 +109,7 @@ def test_successful_tailoring(client, mock_ai):
     assert len(d['suggestions']) == 3
     first = d['suggestions'][0]
     assert (first['section'], first['op'], first['original'], first['suggested']) == ('summary', 'rewrite', SUMMARY, NEW_SUMMARY)
-    assert d['missingQualifications'] == ['Docker'] and d['questions']
+    assert d['missingQualifications'] == [] and d['questions']  # a direct draft makes no 'not evidenced' claims
     assert d['tokens'] == {'input': 600, 'output': 300} and d['estimatedCostUsd'] > 0
     # Only the verified skills reorder may be previewed automatically; wording changes always need approval.
     assert [(s['op'], s['risk'], s['reviewRequired']) for s in d['suggestions']] == [
@@ -280,6 +280,15 @@ def test_match_context_for_ai_first_reports_carries_categories_statuses_evidence
     assert 'Role duties (context only' in context and '- Build dashboards' in context and 'Remote' not in context
 
 
+def test_missing_qualifications_come_from_the_match_report_only():
+    from app.tailor.router import missing_from_match
+    assert missing_from_match({'requirements': [
+        {'requirement': 'Python', 'status': 'demonstrated'}, {'requirement': 'SQL pipelines', 'status': 'partial'},
+        {'requirement': 'LLM evaluation', 'status': 'not_shown'}]}) == ['SQL pipelines', 'LLM evaluation']
+    assert missing_from_match({'partiallyMatched': [{'requirement': 'A'}], 'missing': [{'requirement': 'B'}]}) == ['A', 'B']
+    assert missing_from_match({}) == []
+
+
 def test_match_context_for_historical_reports_keeps_the_legacy_fallback():
     from app.tailor.router import job_context_from_match
     context = job_context_from_match({
@@ -396,6 +405,7 @@ def test_match_reuse_path(client, monkeypatch):
                       json={'cvId': cv, 'jobTitle': 'Backend Engineer', 'jobDescription': JOB}).json()['id']
     r = client.post(f'{BASE}/tailor', headers=h, json={'matchId': mid})
     assert r.status_code == 201 and r.json()['matchId'] == mid and r.json()['suggestions']
+    assert r.json()['missingQualifications'] == ['Docker']  # from the match report's verified statuses, not the model
     # A match belonging to another user cannot be used.
     bob = signup(client, 'bob@example.com')
     assert client.post(f'{BASE}/tailor', headers=bob, json={'matchId': mid}).status_code == 404

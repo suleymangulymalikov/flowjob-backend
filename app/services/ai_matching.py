@@ -66,5 +66,10 @@ def analyze(job_title: str, company: str | None, job_description: str, cv_conten
         return _mock_result()
 
     user_input = build_input(job_title, company, job_description, cv_content)
-    parsed, usage = request_analysis(SYSTEM_PROMPT, user_input, ExperimentAnalysis)
+    parsed, usage = request_analysis(
+        SYSTEM_PROMPT, user_input, ExperimentAnalysis,
+        max_output_tokens=settings.match_max_output_tokens,
+        timeout=settings.match_timeout_seconds,
+        temperature=settings.match_temperature,
+    )
     return AnalysisResult(analysis=parsed, usage=usage, model=settings.openai_model)

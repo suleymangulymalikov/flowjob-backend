@@ -75,3 +75,45 @@ def test_quota_refund_and_cache_still_hold_with_the_new_pipeline(client, monkeyp
     first = post(client, h, cv)
     assert first.status_code == 201 and post(client, h, cv).json()['id'] == first.json()['id']
     assert mock_ai['calls'] == 1  # cache hit under the ai-first prompt version
+
+
+def test_match_generation_uses_the_larger_budget_longer_timeout_and_zero_temperature(monkeypatch):
+    from app.experiment.matching import ExperimentAnalysis
+    seen = {}
+
+    def fake_request(system, user, schema, **kwargs):
+        seen.update(schema=schema, **kwargs)
+        return ExperimentAnalysis(enough_info=False), Usage(1, 1)
+
+    monkeypatch.setattr(settings, 'openai_api_key', 'synthetic-key')
+    monkeypatch.setattr(ai_matching, 'request_analysis', fake_request)
+    ai_matching.analyze('Dev', None, JOB, {'skills': ['Python']})
+    assert seen == {'schema': ExperimentAnalysis, 'max_output_tokens': 3000, 'timeout': 60.0, 'temperature': 0.0}
+
+
+def test_a_model_that_rejects_temperature_is_retried_once_without_it(monkeypatch):
+    import httpx
+    import openai
+    from app.experiment.matching import ExperimentAnalysis
+    bodies = []
+
+    def respond(request):
+        import json
+        body = json.loads(request.content)
+        bodies.append(body)
+        if 'temperature' in body:
+            return httpx.Response(400, json={'error': {'message': "Unsupported parameter: 'temperature'", 'type': 'invalid_request_error'}})
+        text = ExperimentAnalysis(enough_info=False).model_dump_json()
+        return httpx.Response(200, json={
+            'id': 'r', 'object': 'response', 'model': 'gpt-4o-mini', 'status': 'completed',
+            'output': [{'type': 'message', 'id': 'm', 'role': 'assistant', 'status': 'completed',
+                        'content': [{'type': 'output_text', 'text': text, 'annotations': []}]}],
+            'usage': {'input_tokens': 5, 'output_tokens': 2, 'total_tokens': 7}})
+
+    real = openai.OpenAI
+    monkeypatch.setattr(openai, 'OpenAI', lambda **kw: real(
+        **kw, base_url='https://openai.test/v1', http_client=httpx.Client(transport=httpx.MockTransport(respond), trust_env=False)))
+    monkeypatch.setattr(settings, 'openai_api_key', 'synthetic-key')
+    result = ai_matching.analyze('Dev', None, JOB, {'skills': ['Python']})
+    assert [('temperature' in b) for b in bodies] == [True, False] and result.usage.output_tokens == 2
+    assert all(b['max_output_tokens'] == 3000 for b in bodies)

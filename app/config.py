@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     match_job_description_min_chars: int = 80
     match_job_description_max_chars: int = 12000
     match_cache_ttl_hours: int = 720  # reuse an identical analysis for 30 days
+    # Each requirement carries a quote, citations and an explanation (~95 output tokens): up to 25 of them need more than
+    # the shared default. Overflow fails the whole request (and refunds the quota).
+    match_max_output_tokens: int = 3000
+    match_timeout_seconds: float = 60.0
+    match_temperature: float | None = 0.0  # None disables it; models that reject it are retried without it
 
     # CV tailoring (paid, separate per-user cap) + a global daily cap across all AI generations.
     tailor_daily_quota: int = 10

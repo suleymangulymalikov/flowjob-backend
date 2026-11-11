@@ -79,6 +79,16 @@ def job_context_from_match(result: dict[str, Any]) -> str:
     return '\n'.join(x for x in lines if x)[:MAX_CONTEXT_CHARS]
 
 
+def missing_from_match(result: dict[str, Any]) -> list[str]:
+    """Qualifications the match report did not fully verify, taken straight from the report (no AI involved)."""
+    detailed = result.get('requirements')
+    if isinstance(detailed, list) and detailed:
+        names = [r.get('requirement') for r in detailed if r.get('status') != 'demonstrated']
+    else:  # historical report
+        names = [r.get('requirement') for r in (result.get('partiallyMatched') or []) + (result.get('missing') or [])]
+    return [n for n in names if isinstance(n, str) and n][:12]
+
+
 # --- presentation ----------------------------------------------------------------
 
 def present(draft: TailorDraft) -> dict[str, Any]:
@@ -141,6 +151,7 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
         company = match.company
         job_url = match.job_url
         job_context = job_context_from_match(match.result)
+        missing_qualifications = missing_from_match(match.result)
     else:
         if not (data.cvId and data.jobTitle and data.jobDescription):
             raise HTTPException(422, 'Provide a CV and either a match or a job description.')
@@ -152,6 +163,8 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
         company = data.company
         job_url = data.jobUrl
         job_context = job
+        # No verified evidence analysis exists for a direct draft, so no "not evidenced" claims are made.
+        missing_qualifications = []
 
     content = checked_saved_content(cv.content)
     sections = render_cv(content)  # PII-free, every item tagged with its path
@@ -205,7 +218,7 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
                 match_id=match_id, job_title=job_title, company=company, job_url=job_url,
                 cv_hash=cv_hash, job_hash=job_hash, model=out.model, prompt_version=out.prompt_version,
                 suggestions=suggestions, proposal_stats=stats,
-                missing_qualifications=analysis.missing_qualifications,
+                missing_qualifications=missing_qualifications,
                 clarifying_questions=analysis.clarifying_questions,
                 input_tokens=out.usage.input_tokens, output_tokens=out.usage.output_tokens,
                 estimated_cost_usd=estimate_cost_usd(out.usage),
