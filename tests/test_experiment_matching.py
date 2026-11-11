@@ -115,7 +115,8 @@ def test_remoexperts_scenario_scores_the_approved_way():
     assert result['qualificationCounts']['required'] == {'demonstrated': 3, 'partial': 1, 'not_shown': 1, 'count': 5}
     assert result['qualificationCounts']['standard']['count'] == 0
     assert result['diagnostics'] == {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
-                                     'rejected_no_job_quote': 0, 'rejected_working_condition': 0, 'droppedCitations': []}
+                                     'rejected_no_job_quote': 0, 'rejected_working_condition': 0,
+                                     'citations_path_corrected': 0, 'droppedCitations': []}
 
 
 def test_working_conditions_duties_and_traits_are_outside_the_scored_set():
@@ -162,8 +163,9 @@ def test_a_fabricated_quote_is_dropped_and_the_claim_earns_nothing():
 
 @pytest.mark.parametrize('path, quote', [
     ('experience.exp-9.bullets.0', 'Reviewed 300+ annotated text samples'),   # no such role
-    ('experience.exp-1.bullets.1', 'Reviewed 300+ annotated text samples'),   # real text, wrong item
-    ('projects.proj-1.description', 'annotated text samples'),                # cross-item
+    ('projects.proj-1.description', 'annotated text samples'),                # in no field of that entry
+    ('projects.proj-1.tech', 'Cleaned a CSV text dataset with Python'),       # text of ANOTHER project
+    ('experience.exp-1.bullets.0', 'Built a Power BI dashboard'),             # text of a project, cited as a role
     ('skills', 'Label Studio'),                                               # not in the list
     ('summary', ''),                                                          # empty quote
     ('links.0', 'example.test/sam'),                                          # PII never citable
@@ -385,3 +387,74 @@ def test_limit_an_authentic_but_irrelevant_quote_is_accepted():
     result = evaluate(analysis, CV, JOB)
     assert next(r for r in result['requirements'] if r['id'] == 'r5')['status'] == 'demonstrated'
     assert result['score'] == 82 != 66  # the irrelevant evidence inflates the score (required avg rises to 9/10)
+
+
+# --- wrong-field citations (same entry only) ---------------------------------------------------------------
+
+@pytest.mark.parametrize('path, quote, resolved', [
+    ('projects.proj-1.tech', 'Built a Power BI dashboard', 'projects.proj-1.description'),   # the live-test mix-up
+    ('projects.proj-1.name', 'on a SQL sales database', 'projects.proj-1.description'),
+    ('experience.exp-1.bullets.1', 'Reviewed 300+ annotated text samples', 'experience.exp-1.bullets.0'),  # same role
+    ('experience.exp-1.title', 'Wrote and updated a shared documentation page', 'experience.exp-1.bullets.1'),
+    ('[projects.proj-1.tech]', 'Built a Power BI dashboard', 'projects.proj-1.description'),
+])
+def test_a_quote_cited_under_the_wrong_field_moves_to_the_one_matching_field_of_the_same_entry(path, quote, resolved):
+    from app.experiment.matching import resolve_citation
+    assert resolve_citation(CV, Citation(path=path, quote=quote)) == resolved
+
+
+def test_a_correctly_cited_path_is_never_rewritten():
+    from app.experiment.matching import resolve_citation
+    assert resolve_citation(CV, Citation(path='projects.proj-1.tech', quote='Power BI')) == 'projects.proj-1.tech'
+
+
+def test_an_ambiguous_wrong_field_quote_is_rejected_not_guessed():
+    from app.experiment.matching import resolve_citation
+    # "Power BI" appears in BOTH the tech and description of proj-1; cited under .name it matches two fields.
+    assert resolve_citation(CV, Citation(path='projects.proj-1.name', quote='Power BI')) is None
+
+
+@pytest.mark.parametrize('path', ['summary', 'skills', 'languages', 'links.0'])
+def test_top_level_items_have_no_sibling_fields_to_resolve_to(path):
+    from app.experiment.matching import resolve_citation
+    assert resolve_citation(CV, Citation(path=path, quote='Built a Power BI dashboard')) is None
+
+
+def test_a_corrected_citation_is_scored_stored_under_its_real_path_and_counted():
+    analysis = mutate(lambda a: a.requirements.__setitem__(6, R(
+        'r7', 'Dashboards in Power BI', 'preferred', 'demonstrated',
+        [Citation(path='projects.proj-1.tech', quote='Built a Power BI dashboard')],
+        source_quote='Experience building dashboards in Power BI')))
+    result = evaluate(analysis, CV, JOB)
+    dash = next(r for r in result['requirements'] if r['id'] == 'r7')
+    assert dash['status'] == 'demonstrated' and dash['evidence'][0]['path'] == 'projects.proj-1.description'
+    assert result['diagnostics']['citations_path_corrected'] == 1 and result['diagnostics']['citations_dropped'] == 0
+    assert result['score'] == 66
+
+
+# --- the summary is built from verified statuses, in the second person ------------------------------------
+
+def test_summary_is_second_person_and_agrees_with_the_verified_statuses():
+    result = evaluate(good_model_response(), CV, JOB)
+    assert result['overallAssessment'] == (
+        'Your CV clearly shows QA on annotated data and Written documentation skills. '
+        'Data pipelines with Python and SQL is only partly shown, so it is the biggest gap to close.')
+    text = result['overallAssessment']
+    assert text.startswith('Your CV clearly shows') and 'candidate' not in text.lower() and 'the CV' not in text
+
+
+def test_summary_follows_a_downgrade_rather_than_the_models_claim():
+    lying = mutate(lambda a: a.requirements.__setitem__(0, R(
+        'r1', 'QA on annotated data', 'required', 'demonstrated',
+        [Citation(path='experience.exp-1.bullets.0', quote='invented quote')],
+        source_quote='Experience performing quality assurance on annotated or labelled data')))
+    text = evaluate(lying, CV, JOB)['overallAssessment']
+    assert 'QA on annotated data' not in text.split('.')[0]          # no longer listed as a strength
+    assert 'biggest gap to address is QA on annotated data' in text   # reported as the (required) gap
+
+
+def test_summary_when_everything_is_shown_or_nothing_is_scorable():
+    full = evaluate(counts_analysis(required='DD'), CV, COUNTS_JOB)['overallAssessment']
+    assert full.endswith('Every qualification this post lists is shown in your CV.')
+    none = evaluate(counts_analysis(required='D'), CV, COUNTS_JOB)['overallAssessment']
+    assert 'aren’t enough clearly stated qualifications' in none

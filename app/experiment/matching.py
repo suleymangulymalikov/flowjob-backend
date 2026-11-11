@@ -15,8 +15,9 @@ The CODE handles only what is mechanically verifiable:
 3. One small backstop: a qualification whose own wording is a work arrangement, schedule or
    employment type is excluded from scoring (reported, not scored). This is a safety net behind the
    prompt, not a classifier — professional skills that merely mention such words are left alone.
-4. Resolve every CV citation to the one item it names and confirm the quote is verbatim there.
-   A failed citation is dropped; a demonstrated/partial status with no surviving citation becomes
+4. Resolve every CV citation to the one item it names and confirm the quote is verbatim there (a quote
+   cited under the wrong FIELD of the right entry moves to that entry's single matching field, else is
+   rejected; nothing ever moves between entries). A failed citation is dropped; a demonstrated/partial status with no surviving citation becomes
    not_shown.
 5. Compute the percentage deterministically: shares Required 60 / Standard 25 / Preferred 15,
    redistributed over non-empty categories; credit 100/50/0; round half up; minimum two distinct
@@ -72,7 +73,9 @@ SYSTEM_PROMPT = (
     'component is shown), not_shown (otherwise — never guess, never invent).\n'
     '- Cite evidence with the item path printed in square brackets in the CV — copy it exactly, without '
     'the brackets (for example path "experience.exp-1.bullets.0" or "skills") — plus a VERBATIM quote '
-    'copied character-for-character from that one item. Never cite one role or project for another.\n'
+    'copied character-for-character from that one item. The path must be the one printed beside the text you '
+    'quote: text from a project\'s description has the path ending ".description", NOT ".tech" or ".name". '
+    'Never cite one role or project for another.\n'
     '- A quotation that exists in the CV is NOT evidence just because it is authentic. Before citing, ask: '
     'does this text itself show THIS requirement, at the level it asks? A mobile app project is not LLM '
     'evaluation experience; a listed skill is not advanced proficiency or years of experience; a generic '
@@ -80,7 +83,8 @@ SYSTEM_PROMPT = (
     'about another. If no CV text genuinely bears on the requirement, cite nothing and use not_shown — '
     'never stretch a loosely related quote to fit. Projects, coursework, internships, volunteering and '
     'employment all count when they are genuinely relevant.\n'
-    '- explanation: one concise second-person sentence ("Your CV shows ..."). For not_shown write exactly '
+    '- explanation: one concise sentence in the SECOND person, always starting "Your CV shows ..." or '
+    '"You list ..." — never "the CV", "the candidate" or "they". For not_shown write exactly '
     '"Not shown in your CV." — never say the person lacks the skill.\n'
     '\n'
     'Do NOT output a numeric score; the application computes it. Set enough_info=false when the post '
@@ -113,7 +117,6 @@ class ExcludedItem(BaseModel):
 
 class ExperimentAnalysis(BaseModel):
     enough_info: bool
-    overall_note: str = Field(max_length=500)  # short second-person summary
     requirements: list[Requirement] = Field(default_factory=list, max_length=25)
     excluded: list[ExcludedItem] = Field(default_factory=list, max_length=10)
 
@@ -156,11 +159,30 @@ def render_cv(content: dict[str, Any]) -> str:
     return '\n'.join(f'[{path}] {text}' for path, text in _items(content).items())
 
 
-def valid_citation(content: dict[str, Any], citation: Citation) -> bool:
-    """The quote must be a verbatim (case/whitespace-folded) part of exactly the cited item."""
-    text = _items(content).get(citation.path.strip().strip('[]'))
+def resolve_citation(content: dict[str, Any], citation: Citation) -> str | None:
+    """The path whose text verbatim contains the quote, or None.
+
+    The cited path wins when it matches. If the model named the right role/project/education entry but the wrong
+    field (e.g. `.tech` for text that is in `.description`), the quote is moved to the sibling field ONLY when
+    exactly one field of that same entry contains it. Nothing is ever resolved across different entries.
+    """
+    items = _items(content)
+    path = citation.path.strip().strip('[]')
     needle = _fold(citation.quote)
-    return bool(text) and bool(needle) and needle in _fold(text)
+    if not needle:
+        return None
+    if path in items and needle in _fold(items[path]):
+        return path
+    parts = path.split('.')
+    if len(parts) < 3 or parts[0] not in ('experience', 'education', 'projects'):
+        return None  # summary / skills / languages have no sibling fields
+    entry = '.'.join(parts[:2]) + '.'
+    matches = [p for p, text in items.items() if p.startswith(entry) and needle in _fold(text)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def valid_citation(content: dict[str, Any], citation: Citation) -> bool:
+    return resolve_citation(content, citation) is not None
 
 
 # --- small backstops (safety nets behind the prompt, not classifiers) --------------------------------
@@ -200,12 +222,35 @@ def verdict_for(score: int | None) -> str:
     return 'Strong fit' if score >= 80 else 'Good fit' if score >= 60 else 'Partial fit' if score >= 40 else 'Low fit'
 
 
+_RANK = {'required': 0, 'standard': 1, 'preferred': 2}
+
+
+def summarize(requirements: list[dict[str, Any]], scored: bool) -> str:
+    """Short second-person summary built from the VERIFIED statuses, so it can never disagree with the report."""
+    if not scored:
+        return ('There aren’t enough clearly stated qualifications in this post to compare it with your CV reliably. '
+                'Paste the full description, including the requirements section.')
+    ranked = sorted(requirements, key=lambda r: _RANK[r['category']])  # stable: keeps post order within a category
+    strong = [r['requirement'].rstrip('.') for r in ranked if r['status'] == 'demonstrated'][:2]
+    gap = next((r for r in ranked if r['status'] != 'demonstrated'), None)
+    parts = [f'Your CV clearly shows {" and ".join(strong)}.' if strong
+             else 'None of this post’s qualifications are clearly shown in your CV yet.']
+    if gap is None:
+        parts.append('Every qualification this post lists is shown in your CV.')
+    else:
+        name = gap['requirement'].rstrip('.')
+        parts.append(f'{name} is only partly shown, so it is the biggest gap to close.' if gap['status'] == 'partial'
+                     else f'The biggest gap to address is {name}, which isn’t shown in your CV yet.')
+    return ' '.join(parts)
+
+
 def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text: str) -> dict[str, Any]:
     """Verify job quotes, apply the condition backstop, validate CV citations, compute the score. Pure."""
     requirements: list[dict[str, Any]] = []
     rejected: list[dict[str, str]] = []
     diagnostics: dict[str, Any] = {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
-                                   'rejected_no_job_quote': 0, 'rejected_working_condition': 0}
+                                   'rejected_no_job_quote': 0, 'rejected_working_condition': 0,
+                                   'citations_path_corrected': 0}
     dropped: list[dict[str, str]] = []  # internal diagnostics: WHICH citations failed, so drops are never silent
     seen: set[str] = set()
     for r in analysis.requirements:
@@ -222,8 +267,15 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text:
             diagnostics['rejected_working_condition'] += 1
             rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'working_condition'})
             continue
-        kept = [c for c in r.evidence if valid_citation(cv_content, c)]
-        dropped += [{'id': r.id, 'path': c.path, 'quote': c.quote} for c in r.evidence if c not in kept]
+        kept: list[Citation] = []
+        for c in r.evidence:
+            path = resolve_citation(cv_content, c)
+            if path is None:
+                dropped.append({'id': r.id, 'path': c.path, 'quote': c.quote})
+            else:
+                if path != c.path.strip().strip('[]'):
+                    diagnostics['citations_path_corrected'] += 1
+                kept.append(Citation(path=path, quote=c.quote))
         diagnostics['citations_dropped'] += len(r.evidence) - len(kept)
         status = r.status
         explanation = r.explanation
@@ -272,7 +324,7 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text:
         'verdict': verdict_for(score),
         'scoreUnavailableReason': reason,
         'scoreNote': 'preferred_only' if score is not None and non_empty == ['preferred'] else None,
-        'overallAssessment': analysis.overall_note,
+        'overallAssessment': summarize(requirements, score is not None),
         'requirements': requirements,
         'qualificationCounts': counts,
         'eligibilityWarnings': warnings,  # informational; they never change the score

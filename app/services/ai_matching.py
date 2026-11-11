@@ -41,7 +41,6 @@ def _mock_result() -> AnalysisResult:
     """
     analysis = ExperimentAnalysis(
         enough_info=True,
-        overall_note='Your CV clearly shows Python and MongoDB work; Docker is the biggest gap.',
         requirements=[
             Requirement(id='r1', requirement='Python', category='required', source_quote='Python',
                         status='demonstrated', evidence=[Citation(path='skills', quote='Python')],

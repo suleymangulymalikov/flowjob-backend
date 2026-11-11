@@ -24,7 +24,7 @@ def test_prompt_is_the_approved_ai_first_prompt_and_keeps_scoring_out_of_the_mod
 
 def test_mock_analysis_speaks_to_the_user_and_never_claims_a_skill_is_absent():
     a = ai_matching._mock_result().analysis
-    texts = [a.overall_note] + [r.explanation for r in a.requirements]
+    texts = [r.explanation for r in a.requirements]
     for text in texts:
         assert not THIRD_PERSON.search(text) and not ABSENCE.search(text), text
     unshown = [r for r in a.requirements if r.status == 'not_shown']
