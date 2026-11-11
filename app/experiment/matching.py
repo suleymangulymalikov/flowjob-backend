@@ -203,9 +203,39 @@ def is_working_condition(requirement: Requirement) -> bool:
     return bool(_CONDITION.search(_fold(f'{requirement.requirement} {requirement.source_quote}')))
 
 
+_BULLET = re.compile(r'^\s*(?:[-*•–—·▪●]|\d{1,2}[.)])\s+')
+
+
 def quote_in_job(job_text: str, quote: str) -> bool:
-    needle = _fold(quote)
-    return bool(needle) and any(ch.isalnum() for ch in needle) and needle in _fold(job_text)
+    """The quote must be verbatim in the post (case/whitespace folded).
+
+    Only two harmless formatting differences are tolerated, never wording changes: leading list markers
+    ("- ", "• ", "1. "), and a section heading placed before an otherwise verbatim qualification
+    ("Nice to Have: <line>" or the heading on its own line) — provided that heading itself appears in the post.
+    """
+    haystack = _fold(job_text)
+
+    def found(text: str) -> bool:
+        needle = _fold(text)
+        return bool(needle) and any(ch.isalnum() for ch in needle) and needle in haystack
+
+    if found(quote):
+        return True
+    raw = [line for line in quote.splitlines() if line.strip()]
+    lines = [_BULLET.sub('', line).strip() for line in raw]
+    if len(lines) > 1:
+        # At most ONE leading heading line (no list marker, short, and really present in the post) may precede the
+        # qualification; exactly one qualification line must remain.
+        if _BULLET.match(raw[0]) or len(lines[0]) > 60 or not found(lines[0]):
+            return False
+        return len(lines) == 2 and found(lines[1])
+    if lines:
+        line = lines[0]
+        if found(line):
+            return True
+        heading, sep, rest = line.partition(':')
+        return bool(sep) and len(heading) <= 60 and found(heading) and found(rest)
+    return False
 
 
 # --- deterministic scoring --------------------------------------------------------------------------
@@ -247,7 +277,7 @@ def summarize(requirements: list[dict[str, Any]], scored: bool) -> str:
 def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text: str) -> dict[str, Any]:
     """Verify job quotes, apply the condition backstop, validate CV citations, compute the score. Pure."""
     requirements: list[dict[str, Any]] = []
-    rejected: list[dict[str, str]] = []
+    rejected: list[dict[str, str]] = []  # {id, requirement, reason, quote}: short claimed quote, never the job text
     diagnostics: dict[str, Any] = {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
                                    'rejected_no_job_quote': 0, 'rejected_working_condition': 0,
                                    'citations_path_corrected': 0}
@@ -261,11 +291,13 @@ def evaluate(analysis: ExperimentAnalysis, cv_content: dict[str, Any], job_text:
         if not quote_in_job(job_text, r.source_quote):
             # Every scored qualification must reference real text from the post.
             diagnostics['rejected_no_job_quote'] += 1
-            rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'quote_not_in_job'})
+            rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'quote_not_in_job',
+                             'quote': r.source_quote[:240]})  # the model's claimed quote, so a rejection is explainable
             continue
         if is_working_condition(r):
             diagnostics['rejected_working_condition'] += 1
-            rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'working_condition'})
+            rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'working_condition',
+                             'quote': r.source_quote[:240]})
             continue
         kept: list[Citation] = []
         for c in r.evidence:

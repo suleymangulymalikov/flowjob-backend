@@ -24,7 +24,8 @@ def test_an_invented_requirement_is_rejected_at_the_api(client, monkeypatch):
     h = signup(client)
     m = post(client, h, make_cv(client, h)).json()
     assert m['score'] == 80  # the invented requirement changed nothing
-    assert m['rejected'] == [{'id': 'inv', 'requirement': 'Kubernetes', 'reason': 'quote_not_in_job'}]
+    assert m['rejected'] == [{'id': 'inv', 'requirement': 'Kubernetes', 'reason': 'quote_not_in_job',
+                              'quote': 'Experience with Kubernetes clusters'}]
     assert all(x['requirement'] != 'Kubernetes' for x in m['missing'])
 
 

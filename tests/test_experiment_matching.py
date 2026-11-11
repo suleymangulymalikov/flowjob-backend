@@ -320,7 +320,8 @@ def test_backstop_a_working_condition_scored_by_the_model_is_excluded_not_scored
           source_quote='Comfortable working remotely with a distributed team')))
     result = evaluate(analysis, CV, JOB)
     assert all(r['id'] != 'bad' for r in result['requirements'])
-    assert result['rejected'] == [{'id': 'bad', 'requirement': 'Comfortable working remotely', 'reason': 'working_condition'}]
+    assert result['rejected'] == [{'id': 'bad', 'requirement': 'Comfortable working remotely', 'reason': 'working_condition',
+                                   'quote': 'Comfortable working remotely with a distributed team'}]
     assert result['score'] == 66  # unchanged
     assert result['diagnostics']['rejected_working_condition'] == 1
 
@@ -350,7 +351,8 @@ def test_an_invented_requirement_is_rejected_because_its_quote_is_not_in_the_pos
         R('inv', 'Kubernetes', 'required', 'not_shown', source_quote='Experience with Kubernetes clusters')))
     result = evaluate(analysis, CV, JOB)
     assert all(r['id'] != 'inv' for r in result['requirements'])
-    assert result['rejected'] == [{'id': 'inv', 'requirement': 'Kubernetes', 'reason': 'quote_not_in_job'}]
+    assert result['rejected'] == [{'id': 'inv', 'requirement': 'Kubernetes', 'reason': 'quote_not_in_job',
+                                   'quote': 'Experience with Kubernetes clusters'}]
     assert result['score'] == 66 and result['diagnostics']['rejected_no_job_quote'] == 1
 
 
@@ -458,3 +460,55 @@ def test_summary_when_everything_is_shown_or_nothing_is_scorable():
     assert full.endswith('Every qualification this post lists is shown in your CV.')
     none = evaluate(counts_analysis(required='D'), CV, COUNTS_JOB)['overallAssessment']
     assert 'aren’t enough clearly stated qualifications' in none
+
+
+# --- job quotes: only harmless formatting differences are tolerated ---------------------------------------
+
+POWER_BI_LINE = 'Experience building dashboards in Power BI'
+
+
+@pytest.mark.parametrize('quote', [
+    'Experience building dashboards in Power BI.',            # as in the post
+    f'- {POWER_BI_LINE}.',                                     # leading bullet marker
+    f'• {POWER_BI_LINE}',
+    f'1. {POWER_BI_LINE}',
+    f'Nice to Have: {POWER_BI_LINE}',                          # heading before the qualification
+    f'Nice to Have\n- {POWER_BI_LINE}.',                       # heading on its own line + marker
+    f'NICE TO HAVE\n{POWER_BI_LINE}',
+])
+def test_harmless_formatting_differences_in_a_job_quote_are_accepted(quote):
+    from app.experiment.matching import quote_in_job
+    assert quote_in_job(JOB, quote)
+
+
+@pytest.mark.parametrize('quote', [
+    'Experience with dashboards in Power BI',                  # paraphrase
+    f'Optional Extras: {POWER_BI_LINE}',                       # a "heading" that is not in the post
+    f'Nice to Have\n- {POWER_BI_LINE}\n- Familiarity with annotation tools such as Label Studio',  # two qualifications
+    'Nice to Have: Experience building dashboards in Tableau', # invented remainder
+    'Nice to Have\n- Experience building dashboards in Power BI\n- Familiarity with annotation tools such as Label Studio',  # two lines, the first is a qualification
+    'Requirements\nNice to Have\n- Experience building dashboards in Power BI',  # more than one heading line
+    '- Nice to Have\n- Experience building dashboards in Power BI',  # a marked line is not a heading
+    '- ',
+    '',
+])
+def test_paraphrases_invented_text_and_multiple_lines_are_still_rejected(quote):
+    from app.experiment.matching import quote_in_job
+    assert not quote_in_job(JOB, quote)
+
+
+def test_a_heading_prefixed_quote_is_scored_and_a_rejection_explains_itself():
+    ok = mutate(lambda a: a.requirements.__setitem__(6, R(
+        'r7', 'Dashboards in Power BI', 'preferred', 'demonstrated',
+        [Citation(path='projects.proj-1.description', quote='Built a Power BI dashboard')],
+        source_quote=f'Nice to Have: {POWER_BI_LINE}')))
+    result = evaluate(ok, CV, JOB)
+    assert result['score'] == 66 and result['rejected'] == []
+    bad = mutate(lambda a: a.requirements.__setitem__(6, R(
+        'r7', 'Dashboards in Power BI', 'preferred', 'demonstrated',
+        [Citation(path='projects.proj-1.description', quote='Built a Power BI dashboard')],
+        source_quote='Experience with dashboards in Power BI')))
+    out = evaluate(bad, CV, JOB)
+    (entry,) = out['rejected']
+    assert entry['reason'] == 'quote_not_in_job' and entry['quote'] == 'Experience with dashboards in Power BI'
+    assert JOB not in str(out['rejected'])  # only the short claimed quote, never the post
