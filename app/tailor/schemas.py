@@ -1,42 +1,38 @@
-"""Schemas for AI CV tailoring.
+"""Schemas for AI CV tailoring (AI-first contract).
 
-`TailoringAnalysis` is the model's structured output: a bounded list of section-level change
-proposals, each tied to an existing CV section and carrying the ORIGINAL text it rewrites.
-The backend verifies that `original` identifies an exact source target. Changes beyond
-verifiable formatting need explicit review before the frontend applies them.
+`TailoringAnalysis` is the model's structured output: a short list of typed change PROPOSALS addressed by CV path
+(the same paths the match feature cites, e.g. "summary", "experience.exp-1.bullets.0", "projects.p1.description",
+"skills"). The model never copies original text and never labels a change "safe": the backend resolves every
+target, fills in the original text, checks reorders are exact permutations and skill additions are backed by a
+verbatim CV quotation, and decides which changes may be previewed automatically (verified reorders only).
 """
-from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-TAILORING_PROMPT_VERSION = '1'
-TAILORING_VERSION = '1'
-
-
-class ChangeSection(str, Enum):
-    summary = 'summary'
-    experience = 'experience'
-    skills = 'skills'
-    project = 'project'
+TAILORING_PROMPT_VERSION = 'ai-first-1'
+TAILORING_VERSION = '2'
+MAX_CHANGES = 12
 
 
 class ProposedChange(BaseModel):
-    section: ChangeSection
-    experience_id: str | None = None
-    bullet_index: int | None = None
-    project_id: str | None = None
-    # The exact existing text being rewritten (used to verify grounding), and the rewrite.
-    original: str = Field(max_length=800)
-    suggested: str = Field(max_length=800)
-    explanation: str = Field(max_length=400)
-    job_requirement: str | None = Field(default=None, max_length=200)
-    # True when the model is not fully certain the rewrite is supported by the CV.
-    review_required: bool = False
+    op: Literal['rewrite', 'reorder', 'delete', 'add_skill']
+    # rewrite: summary | experience.<id>.bullets.<n> | projects.<id>.description
+    # reorder: "skills" or "experience.<id>" (that role's bullets)   delete: experience.<id>.bullets.<n> or "skills"
+    # add_skill: "skills"
+    path: str = Field(max_length=100)
+    suggested: str | None = Field(default=None, max_length=800)  # rewrite: new text; add_skill/delete skill: the skill name
+    order_skills: list[str] = Field(default_factory=list, max_length=100)  # reorder skills: ALL skills, new order
+    order_bullets: list[int] = Field(default_factory=list, max_length=40)  # reorder bullets: ALL current indices, new order
+    reason: str = Field(max_length=240)  # why it helps for this job, addressed to the CV owner
+    job_requirement: str | None = Field(default=None, max_length=160)
+    evidence_path: str | None = Field(default=None, max_length=100)  # add_skill: where the CV already names the skill
+    evidence_quote: str | None = Field(default=None, max_length=240)  # add_skill: verbatim quote from that item
 
 
 class TailoringAnalysis(BaseModel):
-    changes: list[ProposedChange] = Field(default_factory=list, max_length=25)
+    # An empty list is a valid, successful answer: nothing worth changing.
+    changes: list[ProposedChange] = Field(default_factory=list, max_length=MAX_CHANGES)
     # Requirements the job needs but the CV does not support — surfaced, never added.
     missing_qualifications: list[str] = Field(default_factory=list, max_length=12)
     clarifying_questions: list[str] = Field(default_factory=list, max_length=8)
@@ -67,6 +63,7 @@ class TailorDraftResponse(BaseModel):
     tokens: dict[str, int]
     estimatedCostUsd: float
     createdAt: str
+    proposalStats: dict[str, Any] | None = None  # {proposed, kept, rejected: {reason: count}}
 
 
 class VerifiedTailorDraftResponse(TailorDraftResponse):

@@ -4,6 +4,7 @@ Generates truthful, section-level rewrite proposals grounded in the user's ORIGI
 Never modifies the original; the accepted result is saved as a new CV via POST /cvs.
 """
 import hashlib
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
@@ -23,12 +24,12 @@ from app.services.ai_cache import cache_model, coalesce_request, job_fingerprint
 from app.services.ai_provider import AiError, error_response, estimate_cost_usd
 from app.services.ai_quota import generation_quota
 from app.tailor.drafts import owned_draft
-from app.tailor.grounding import safe_to_auto_apply, target_text
+from app.experiment.matching import render_cv
+from app.tailor.grounding import MAX_ADDED_SKILLS, ground
 from app.tailor.models import TailorDraft
 from app.tailor.schemas import (
     TAILORING_PROMPT_VERSION,
     CreateTailor,
-    ProposedChange,
     TailorDraftResponse,
     TailoringAnalysis,
     VerifiedTailorDraftResponse,
@@ -43,55 +44,42 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-# --- CV sections (PII minimized, id-tagged for grounding) ------------------------
+# --- job context from a match report ---------------------------------------------
 
-def cv_sections(content: dict[str, Any]) -> str:
-    c = content or {}
-    lines: list[str] = []
-    if c.get('summary'):
-        lines.append(f'[summary] {c["summary"]}')
-    for e in c.get('experience') or []:
-        for i, b in enumerate(e.get('bullets') or []):
-            if b:
-                lines.append(f'[experience id={e.get("id")} bullet={i}] {b}')
-    for p in c.get('projects') or []:
-        if p.get('description'):
-            lines.append(f'[project id={p.get("id")}] {p["description"]}')
-    if c.get('skills'):
-        lines.append(f'[skills] {", ".join(c["skills"])}')
-    return '\n'.join(lines)
+MAX_CONTEXT_CHARS = 3500
 
 
 def job_context_from_match(result: dict[str, Any]) -> str:
+    """Compact job context for tailoring.
+
+    AI-first reports contribute each qualification's category, verified status and the CV quotation that shows it,
+    plus the role's duties as context. Historical reports (no `requirements`) fall back to the saved assessment and
+    requirement names.
+    """
     lines = [result.get('overallAssessment') or result.get('summary') or '']
-    for key, label in [('matched', 'already matched'), ('partiallyMatched', 'partially matched'),
-                       ('missing', 'missing/unverified')]:
-        for r in result.get(key) or []:
-            lines.append(f'- [{label}] {r.get("requirement")} ({r.get("importance")})')
-    return '\n'.join(x for x in lines if x)
+    detailed = result.get('requirements')
+    if isinstance(detailed, list) and detailed:
+        lines.append('Qualifications (importance, whether the CV shows it, CV evidence):')
+        for r in detailed:
+            line = f'- [{r.get("category")} | {str(r.get("status", "")).replace("_", " ")}] {r.get("requirement")}'
+            cites = r.get('evidence') or []
+            if cites:
+                line += f' — evidence {cites[0].get("path")}: "{str(cites[0].get("quote", ""))[:110]}"'
+            lines.append(line)
+        duties = [e.get('text') for e in result.get('excluded') or [] if e.get('reason') == 'job_duty'][:5]
+        if duties:
+            lines.append('Role duties (context only, not qualifications):')
+            lines += [f'- {d}' for d in duties]
+    else:
+        for key, label in [('matched', 'already matched'), ('partiallyMatched', 'partially matched'),
+                           ('missing', 'not shown in CV')]:
+            for r in result.get(key) or []:
+                tag = f' ({r["importance"]})' if r.get('importance') else ''
+                lines.append(f'- [{label}] {r.get("requirement")}{tag}')
+    return '\n'.join(x for x in lines if x)[:MAX_CONTEXT_CHARS]
 
 
 # --- presentation ----------------------------------------------------------------
-
-def _suggestion_dto(ch: ProposedChange, idx: int, original: str, review_required: bool) -> dict[str, Any]:
-    dto: dict[str, Any] = {
-        'id': f's{idx}',
-        'section': ch.section.value,
-        'original': original,
-        'suggested': ch.suggested,
-        'explanation': ch.explanation,
-        'reviewRequired': review_required,
-    }
-    if ch.experience_id is not None:
-        dto['experienceId'] = str(ch.experience_id)
-    if ch.bullet_index is not None:
-        dto['bulletIndex'] = ch.bullet_index
-    if ch.project_id is not None:
-        dto['projectId'] = str(ch.project_id)
-    if ch.job_requirement:
-        dto['jobRequirement'] = ch.job_requirement
-    return dto
-
 
 def present(draft: TailorDraft) -> dict[str, Any]:
     return {
@@ -107,6 +95,7 @@ def present(draft: TailorDraft) -> dict[str, Any]:
         ],
         'missingQualifications': draft.missing_qualifications,
         'questions': draft.clarifying_questions,
+        'proposalStats': draft.proposal_stats,
         'tokens': {'input': draft.input_tokens, 'output': draft.output_tokens},
         'estimatedCostUsd': draft.estimated_cost_usd,
         'createdAt': draft.created_at.isoformat(),
@@ -165,7 +154,7 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
         job_context = job
 
     content = checked_saved_content(cv.content)
-    sections = cv_sections(content)
+    sections = render_cv(content)  # PII-free, every item tagged with its path
     if not sections.strip():
         raise HTTPException(422, 'This CV has no content to tailor yet.')
     cv_hash = _sha(sections)
@@ -192,25 +181,30 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
                 raise HTTPException(status, message) from error
 
             analysis: TailoringAnalysis = out.analysis
-            # Bind the exact target text, and accept at most one proposal for each target.
-            suggestions = []
-            seen_targets = set()
+            # Resolve every proposal against the source CV. Anything invalid is COUNTED, never silently lost.
+            suggestions: list[dict[str, Any]] = []
+            rejected: Counter[str] = Counter()
+            seen_targets: set[tuple[str, str]] = set()
             for i, change in enumerate(analysis.changes):
-                original = target_text(content, change)
-                target = (change.section, change.experience_id, change.bullet_index, change.project_id)
-                if not original or not original.strip() or change.original.strip() != original.strip():
-                    continue
-                if not change.suggested.strip() or target in seen_targets:
+                fields, reason = ground(content, change)
+                target = (change.op if change.op == 'add_skill' else 'edit', change.path)
+                if fields is not None and change.op != 'add_skill' and target in seen_targets:
+                    fields, reason = None, 'duplicate_target'
+                if fields is not None and change.op == 'add_skill' and sum(
+                        1 for x in suggestions if x['op'] == 'add_skill') >= MAX_ADDED_SKILLS:
+                    fields, reason = None, 'too_many_added_skills'
+                if fields is None:
+                    rejected[reason or 'invalid'] += 1
                     continue
                 seen_targets.add(target)
-                review_required = change.review_required or not safe_to_auto_apply(change, original, content)
-                suggestions.append(_suggestion_dto(change, i, original, review_required))
+                suggestions.append({'id': f's{i}', **fields, 'reviewRequired': fields['risk'] != 'auto'})
+            stats = {'proposed': len(analysis.changes), 'kept': len(suggestions), 'rejected': dict(rejected)}
 
             draft = TailorDraft(
                 user_id=user.id, source_cv_id=cv.id, source_cv_revision=revision,
                 match_id=match_id, job_title=job_title, company=company, job_url=job_url,
                 cv_hash=cv_hash, job_hash=job_hash, model=out.model, prompt_version=out.prompt_version,
-                suggestions=suggestions,
+                suggestions=suggestions, proposal_stats=stats,
                 missing_qualifications=analysis.missing_qualifications,
                 clarifying_questions=analysis.clarifying_questions,
                 input_tokens=out.usage.input_tokens, output_tokens=out.usage.output_tokens,

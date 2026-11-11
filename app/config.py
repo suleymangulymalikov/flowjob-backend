@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # CV tailoring (paid, separate per-user cap) + a global daily cap across all AI generations.
     tailor_daily_quota: int = 10
     tailor_cache_ttl_hours: int = 720
+    # Tailoring proposes up to 12 typed changes with reasons and evidence: larger budget than the shared default.
+    tailor_max_output_tokens: int = 3500
+    tailor_timeout_seconds: float = 60.0
+    tailor_temperature: float | None = 0.2
     ai_global_daily_quota: int = 500
 
 

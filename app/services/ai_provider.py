@@ -37,28 +37,56 @@ class Usage:
     output_tokens: int
 
 
-def request_analysis[T: BaseModel](system_prompt: str, user_input: str, schema: type[T]) -> tuple[T, Usage]:
+# Model families that reject a sampling temperature (reasoning models). Others accept it.
+_NO_TEMPERATURE_PREFIXES = ('o1', 'o3', 'o4', 'gpt-5')
+
+
+def supports_temperature(model: str) -> bool:
+    return not model.strip().lower().startswith(_NO_TEMPERATURE_PREFIXES)
+
+
+def request_analysis[T: BaseModel](
+    system_prompt: str,
+    user_input: str,
+    schema: type[T],
+    *,
+    max_output_tokens: int | None = None,
+    timeout: float | None = None,
+    temperature: float | None = None,
+) -> tuple[T, Usage]:
     if not settings.openai_api_key:
         raise AiNotConfigured()
 
     import openai
 
+    request: dict = {
+        'model': settings.openai_model,
+        'input': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_input},
+        ],
+        'text_format': schema,
+        'max_output_tokens': max_output_tokens or settings.openai_max_output_tokens,
+        'store': False,
+    }
+    if temperature is not None and supports_temperature(settings.openai_model):
+        request['temperature'] = temperature
+
     try:
         # A timeout or disconnect can occur after the provider starts generating.
         # One attempt avoids submitting that same potentially billable request again.
         with openai.OpenAI(
-            api_key=settings.openai_api_key, timeout=settings.openai_timeout_seconds, max_retries=0,
+            api_key=settings.openai_api_key, timeout=timeout or settings.openai_timeout_seconds, max_retries=0,
         ) as client:
-            response = client.responses.parse(
-                model=settings.openai_model,
-                input=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_input},
-                ],
-                text_format=schema,
-                max_output_tokens=settings.openai_max_output_tokens,
-                store=False,
-            )
+            try:
+                response = client.responses.parse(**request)
+            except openai.BadRequestError as error:
+                # A model that rejects `temperature` fails validation BEFORE generating anything, so repeating the
+                # request without it is not a second billable generation. Any other 400 is a real failure.
+                if 'temperature' not in request or 'temperature' not in str(error).lower():
+                    raise
+                del request['temperature']
+                response = client.responses.parse(**request)
     except openai.APITimeoutError as error:
         raise AiTimeout() from error
     except openai.RateLimitError as error:

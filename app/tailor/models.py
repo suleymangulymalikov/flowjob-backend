@@ -28,6 +28,9 @@ class TailorDraft(Document):
     missing_qualifications: list[str] = Field(default_factory=list)
     clarifying_questions: list[str] = Field(default_factory=list)
 
+    # Counts only: how many proposals were made, kept and rejected (by reason). Never CV or job text.
+    proposal_stats: dict[str, Any] | None = None
+
     input_tokens: int = 0
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
