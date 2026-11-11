@@ -8,13 +8,7 @@ from beanie import PydanticObjectId
 from app.config import settings
 from app.matches import router as matches_router
 from app.matches.models import MatchRecord
-from app.matches.schemas import (
-    AiAnalysis,
-    EvidenceStatus,
-    Importance,
-    RequirementAssessment,
-    SuggestedWording,
-)
+from app.ai_matching.matching import Citation, MatchAnalysis, Requirement, render_cv
 from app.services import ai_matching, ai_provider, ai_tailoring
 from app.services.ai_matching import AnalysisResult
 from app.services.ai_provider import Usage
@@ -48,22 +42,22 @@ def make_cv(client, headers, name='My CV'):
     return r.json()['id']
 
 
-def analysis(enough=True, reqs=None, **kw):
+def req(id, text, category, status, evidence=(), source_quote=None, explanation=None, **kw):
+    return Requirement(id=id, requirement=text, category=category, status=status,
+                       source_quote=source_quote or text, evidence=list(evidence),
+                       explanation=explanation or ('Not shown in your CV.' if status == 'not_shown'
+                                                   else f'Your CV shows {text}.'), **kw)
+
+
+def analysis(enough=True, reqs=None):
     if reqs is None:
         reqs = [
-            RequirementAssessment(requirement='Python', importance=Importance.required,
-                                  status=EvidenceStatus.clearly_demonstrated, evidence='Built REST APIs with Python'),
-            RequirementAssessment(requirement='MongoDB', importance=Importance.required,
-                                  status=EvidenceStatus.clearly_demonstrated, evidence='Used MongoDB'),
-            RequirementAssessment(requirement='Docker', importance=Importance.preferred,
-                                  status=EvidenceStatus.not_mentioned, evidence='Not mentioned in the CV'),
+            req('r1', 'Python', 'required', 'demonstrated', [Citation(path='skills', quote='Python')]),
+            req('r2', 'MongoDB', 'required', 'demonstrated', [Citation(path='skills', quote='MongoDB')]),
+            req('r3', 'Docker', 'preferred', 'not_shown'),
         ]
-    return AiAnalysis(
-        enough_info=enough, overall_assessment='Solid backend alignment.', requirements=reqs,
-        strengths=['Python APIs'], areas_to_improve=['Add Docker'], recommendations=['Mention containers'],
-        suggested_wording=[SuggestedWording(section='summary', suggestion='Backend engineer with Python/MongoDB')],
-        clarifying_questions=['Have you used Docker?'], **kw,
-    )
+    return MatchAnalysis(enough_info=enough, overall_note='Your CV shows solid backend alignment.',
+                              requirements=reqs)
 
 
 @pytest.fixture
@@ -120,14 +114,14 @@ def test_valid_analysis_and_score(client, mock_ai):
                     json={'cvId': cv, 'jobTitle': 'Backend Engineer', 'jobDescription': JOB, 'company': 'Acme'})
     assert r.status_code == 201, r.text
     m = r.json()
-    # required Python(1.0)+MongoDB(1.0) weight 2 each, preferred Docker(0) weight 1 =>
-    # earned 2*1+2*1+1*0 = 4 / total 5 = 80
+    # Required (2 of 2 shown) share 60, Preferred (0 of 1) share 15, Standard empty and redistributed:
+    # 100 * (60*1 + 15*0) / 75 = 80.
     assert m['score'] == 80 and m['scoreAvailable'] is True and m['verdict'] == 'Strong fit'
     assert m['overallAssessment'] and m['scoreExplanation']
     assert any(x['requirement'] == 'Python' for x in m['matched'])
     assert any(x['requirement'] == 'Docker' for x in m['missing'])
-    assert m['recommendations'] and m['questions']
-    assert m['model'] == 'mock' and m['analysisVersion']
+    assert m['recommendations'] == [] and m['questions'] == []  # the AI-first analysis produces no advice prose
+    assert m['model'] == 'mock' and m['analysisVersion'] == 'ai-first-1' 
     assert m['tokens'] == {'input': 400, 'output': 200} and m['estimatedCostUsd'] > 0
 
 
@@ -135,7 +129,7 @@ def test_pii_minimized_in_evidence(client, mock_ai):
     h = signup(client)
     cv = make_cv(client, h)
     client.post(f'{BASE}/matches', headers=h, json={'cvId': cv, 'jobTitle': 'Dev', 'jobDescription': JOB})
-    ev = mock_ai['last_evidence']
+    ev = render_cv(mock_ai['last_evidence'])  # what the model would actually see
     assert 'Python' in ev  # real evidence present
     for pii in ('Ana Secret', 'ana@example.com', '555-0100', 'linkedin.com/in/ana'):
         assert pii not in ev  # name/email/phone/links excluded
@@ -236,12 +230,12 @@ def test_cv_revision_invalidates_match_even_with_unchanged_evidence(client, mock
     body = {'cvId': cv, 'jobTitle': 'Dev', 'jobDescription': JOB}
     endpoint = f'{BASE}/matches'
     first = client.post(endpoint, headers=h, json=body).json()
-    evidence = mock_ai['last_evidence']
+    evidence = render_cv(mock_ai['last_evidence'])  # location is PII and never part of what the model sees
     source_url = f'{BASE}/cvs/{cv}'
     content = client.get(source_url, headers=h).json()['content']
     assert client.put(source_url, headers=h, json={'content': {**content, 'location': 'Warsaw'}}).status_code == 200
     edited = client.post(endpoint, headers=h, json=body).json()
-    assert edited['id'] != first['id'] and mock_ai['last_evidence'] == evidence
+    assert edited['id'] != first['id'] and render_cv(mock_ai['last_evidence']) == evidence
     assert client.post(endpoint, headers=h, json=body).json()['id'] == edited['id']
 
     assert client.delete(source_url, headers=h).status_code == 204

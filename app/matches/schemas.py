@@ -10,7 +10,10 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 ANALYSIS_VERSION = '1'
-PROMPT_VERSION = '1'
+# Bumped to '2' with the second-person ("Your CV shows ...") wording rules. The version is part of every
+# cache/dedup identity, so a new request never reuses an older third-person analysis, while stored
+# records (prompt_version '1') are left untouched and remain readable.
+PROMPT_VERSION = '2'
 
 
 class Importance(str, Enum):
@@ -29,7 +32,7 @@ class RequirementAssessment(BaseModel):
     requirement: str = Field(max_length=200)
     importance: Importance
     status: EvidenceStatus
-    # Grounded in the CV, or an explicit "Not mentioned in the CV." Never invented.
+    # Grounded in the CV, or an explicit "Not shown in your CV." Never invented.
     evidence: str = Field(max_length=500)
 
 

@@ -7,7 +7,7 @@ from app.services import ai_matching, ai_provider, ai_tailoring
 from app.services.ai_provider import Usage
 from app.services.ai_tailoring import TailoringResult
 from app.tailor.models import TailorDraft
-from app.tailor.schemas import ChangeSection, ProposedChange, TailoringAnalysis
+from app.tailor.schemas import ProposedChange, TailoringAnalysis
 
 BASE = '/api/v1'
 JOB = (
@@ -16,6 +16,8 @@ JOB = (
 )
 SUMMARY = 'Engineer who builds APIs.'
 BULLET = 'Built REST APIs with Python and MongoDB'
+NEW_SUMMARY = 'Backend engineer who builds REST APIs with Python and MongoDB.'
+NEW_BULLET = 'Designed and shipped REST APIs with Python and MongoDB'
 
 
 def signup(client, email='ana@example.com'):
@@ -38,15 +40,16 @@ def make_cv(client, headers, name='My CV'):
     return r.json()['id']
 
 
+def rewrite(path, text, reason='Clearer for this job.'):
+    return ProposedChange(op='rewrite', path=path, suggested=text, reason=reason, job_requirement='Backend')
+
+
 def tailoring(changes=None):
     if changes is None:
         changes = [
-            ProposedChange(section=ChangeSection.summary, original=SUMMARY,
-                           suggested=SUMMARY.removesuffix('.'),
-                           explanation='Consistent sentence punctuation.', job_requirement='Backend'),
-            ProposedChange(section=ChangeSection.experience, experience_id='0', bullet_index=0, original=BULLET,
-                           suggested=BULLET + '.',
-                           explanation='Consistent bullet punctuation.'),
+            rewrite('summary', NEW_SUMMARY, 'Leads with the backend focus the job asks for.'),
+            rewrite('experience.0.bullets.0', NEW_BULLET),
+            ProposedChange(op='reorder', path='skills', order_skills=['MongoDB', 'Python'], reason='Puts the data skill first.'),
         ]
     return TailoringAnalysis(changes=changes, missing_qualifications=['Docker'], clarifying_questions=['Used Docker?'])
 
@@ -103,11 +106,16 @@ def test_successful_tailoring(client, mock_ai):
     r = tailor(client, h, cv)
     assert r.status_code == 201, r.text
     d = r.json()
-    assert len(d['suggestions']) == 2
-    assert d['suggestions'][0]['section'] == 'summary' and d['suggestions'][0]['original'] == SUMMARY
-    assert d['missingQualifications'] == ['Docker'] and d['questions']
+    assert len(d['suggestions']) == 3
+    first = d['suggestions'][0]
+    assert (first['section'], first['op'], first['original'], first['suggested']) == ('summary', 'rewrite', SUMMARY, NEW_SUMMARY)
+    assert d['missingQualifications'] == [] and d['questions']  # a direct draft makes no 'not evidenced' claims
     assert d['tokens'] == {'input': 600, 'output': 300} and d['estimatedCostUsd'] > 0
-    assert all(s['reviewRequired'] is False for s in d['suggestions'])  # only formatting changed
+    # Only the verified skills reorder may be previewed automatically; wording changes always need approval.
+    assert [(s['op'], s['risk'], s['reviewRequired']) for s in d['suggestions']] == [
+        ('rewrite', 'review', True), ('rewrite', 'review', True), ('reorder', 'auto', False)]
+    assert d['suggestions'][2]['suggested'] == 'MongoDB, Python' and d['suggestions'][2]['original'] == 'Python, MongoDB'
+    assert d['proposalStats'] == {'proposed': 3, 'kept': 3, 'rejected': {}}
     assert d['sourceCvRevision'] == client.get(f'{BASE}/cvs/{cv}', headers=h).json()['contentRevision']
 
 
@@ -121,48 +129,172 @@ def test_pii_minimized_in_sections(client, mock_ai):
         assert pii not in s
 
 
-def test_invalid_proposals_are_discarded_without_losing_valid_changes(client, monkeypatch):
-    proposals = tailoring(changes=[
-        ProposedChange(section=ChangeSection.summary, original=original, suggested='Rewrite', explanation='x')
-        for original in ('', '  ', 'Engineer', 'Engineer who builds APIs. More details')
-    ] + [
-        ProposedChange(section=ChangeSection.experience, experience_id=item_id, bullet_index=index,
-                       original=BULLET, suggested=BULLET + '.', explanation='x')
-        for item_id, index in (('missing', 0), ('0', -1), ('0', 42), (None, 0))
-    ] + [
-        ProposedChange(section=ChangeSection.project, project_id='absent', original='A REST service',
-                       suggested='A REST service.', explanation='x'),
-        *tailoring().changes,
-        tailoring().changes[0],
-    ])
+def test_invalid_proposals_are_counted_and_valid_changes_survive(client, monkeypatch):
+    bad = [
+        rewrite('summary', '   '),                                              # empty_suggestion
+        rewrite('summary', SUMMARY.removesuffix('.').upper()),                  # cosmetic_no_change
+        rewrite('experience.missing.bullets.0', 'x'),                           # unknown_target
+        rewrite('experience.0.bullets.42', 'x'),                                # unknown_target
+        rewrite('projects.absent.description', 'x'),                            # unknown_target
+        rewrite('education.0.degree', 'x'),                                     # unknown_path
+        rewrite('skills', 'Python, Rust'),                                      # rewrite_target_not_text
+        ProposedChange(op='reorder', path='skills', order_skills=['Python'], reason='x'),                  # bad_permutation
+        ProposedChange(op='reorder', path='skills', order_skills=['Python', 'MongoDB'], reason='x'),       # no_change
+        ProposedChange(op='reorder', path='experience.0', order_bullets=[0, 0], reason='x'),               # a single bullet cannot be reordered
+        ProposedChange(op='delete', path='experience.0.bullets.9', reason='x'),                            # unknown_target
+        ProposedChange(op='add_skill', path='skills', suggested='Rust', reason='x'),                       # no_evidence
+        rewrite('summary', NEW_SUMMARY),                                        # valid
+        rewrite('summary', 'A second change to the same summary.'),            # duplicate_target
+        rewrite('experience.0.bullets.0', NEW_BULLET),                          # valid
+    ]
     monkeypatch.setattr(ai_tailoring, 'analyze',
-                        lambda *a: TailoringResult(analysis=proposals, usage=Usage(1, 1), model='mock'))
+                        lambda *a: TailoringResult(analysis=TailoringAnalysis.model_construct(
+                            changes=bad, missing_qualifications=[], clarifying_questions=[]), usage=Usage(1, 1), model='mock'))
     h = signup(client)
     cv = make_cv(client, h)
     r = tailor(client, h, cv)
     assert r.status_code == 201, r.text
-    assert [s['original'] for s in r.json()['suggestions']] == [SUMMARY, BULLET]
+    body = r.json()
+    assert [s['suggested'] for s in body['suggestions']] == [NEW_SUMMARY, NEW_BULLET]
+    stats = body['proposalStats']
+    assert (stats['proposed'], stats['kept']) == (15, 2)
+    assert stats['rejected'] == {
+        'empty_suggestion': 1, 'cosmetic_no_change': 1, 'unknown_target': 5, 'unknown_path': 1, 'rewrite_target_not_text': 1,
+        'bad_permutation': 1, 'no_change': 1, 'no_evidence': 1, 'duplicate_target': 1}
 
 
-@pytest.mark.parametrize('suggested', [
-    'Engineer who builds APIs and has an AWS certification.',
-    'Engineer who builds APIs with Docker.',
-    'Engineer who built 300 APIs.',
-    'Engineer who leads the API team at Contoso.',
-    'Engineer who does not build APIs.',
-])
-def test_exact_source_does_not_auto_approve_new_claims(client, monkeypatch, suggested):
-    analysis = tailoring(changes=[
-        ProposedChange(section=ChangeSection.summary, original=SUMMARY, suggested=suggested,
-                       explanation='Claimed to be safe by the model.', review_required=False),
-        ProposedChange(section=ChangeSection.skills, original='Python, MongoDB', suggested='MongoDB, Python',
-                       explanation='Sort existing skills.', review_required=False),
-    ])
-    monkeypatch.setattr(ai_tailoring, 'analyze',
-                        lambda *a: TailoringResult(analysis=analysis, usage=Usage(1, 1), model='mock'))
+def _tailor_with(client, monkeypatch, changes, cv_content=None):
+    monkeypatch.setattr(ai_tailoring, 'analyze', lambda *a: TailoringResult(
+        analysis=TailoringAnalysis(changes=changes), usage=Usage(1, 1), model='mock'))
     h = signup(client)
-    result = tailor(client, h, make_cv(client, h)).json()
-    assert [s['reviewRequired'] for s in result['suggestions']] == [True, False]
+    cv = make_cv(client, h)
+    if cv_content is not None:
+        assert client.put(f'{BASE}/cvs/{cv}', headers=h, json={'content': cv_content}).status_code == 200
+    return tailor(client, h, cv).json()
+
+
+def test_the_model_cannot_make_a_rewrite_automatic_only_verified_reorders_are(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [
+        rewrite('summary', 'Engineer who builds APIs and has an AWS certification.'),
+        rewrite('experience.0.bullets.0', 'Built 300 REST APIs with Python and MongoDB'),
+        ProposedChange(op='reorder', path='skills', order_skills=['mongodb', 'PYTHON'], reason='Order.'),
+    ])
+    assert [(s['op'], s['risk']) for s in d['suggestions']] == [('rewrite', 'review'), ('rewrite', 'review'), ('reorder', 'auto')]
+    assert d['suggestions'][2]['suggested'] == 'MongoDB, Python'   # original spelling restored
+
+
+def test_bullet_reorder_must_be_an_exact_permutation_and_is_auto(client, monkeypatch):
+    content = {'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '',
+               'experience': [{'id': '0', 'title': 'Developer', 'company': 'Acme', 'start': '2022-01', 'end': '',
+                               'bullets': ['First', 'Second', 'Third']}],
+               'projects': [], 'skills': ['Python']}
+    d = _tailor_with(client, monkeypatch, [
+        ProposedChange(op='reorder', path='experience.0', order_bullets=[2, 0, 1], reason='Most relevant first.'),
+        ProposedChange(op='reorder', path='experience.0', order_bullets=[2, 2, 1], reason='bad'),
+    ], content)
+    (only,) = d['suggestions']
+    assert only['order'] == [2, 0, 1] and only['risk'] == 'auto' and only['experienceId'] == '0' and 'bulletIndex' not in only
+    assert d['proposalStats']['rejected'] == {'bad_permutation': 1}
+
+
+def test_delete_always_needs_approval(client, monkeypatch):
+    content = {'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '', 'projects': [],
+               'experience': [{'id': '0', 'title': 'Developer', 'company': 'Acme', 'start': '2022-01', 'end': '',
+                               'bullets': ['Built APIs', 'Built APIs.']}], 'skills': ['Python', 'python ']}
+    d = _tailor_with(client, monkeypatch, [
+        ProposedChange(op='delete', path='experience.0.bullets.1', reason='Repeats the first bullet.'),
+        ProposedChange(op='delete', path='skills', suggested='python', reason='Duplicate skill.'),
+    ], content)
+    assert [(s['op'], s['risk'], s['reviewRequired']) for s in d['suggestions']] == [('delete', 'review', True)] * 2
+    assert d['suggestions'][0]['original'] == 'Built APIs.' and d['suggestions'][1]['skill'] == 'Python'
+
+
+@pytest.mark.parametrize('change, reason', [
+    (dict(suggested='Docker', evidence_path='projects.0.description', evidence_quote='A REST service'), 'evidence_does_not_name_skill'),
+    (dict(suggested='Docker', evidence_path='projects.0.description', evidence_quote='Dockerised everything'), 'evidence_not_in_cv'),
+    (dict(suggested='FastAPI', evidence_path='skills', evidence_quote='Python'), 'no_evidence'),
+    (dict(suggested='FastAPI', evidence_path='summary', evidence_quote='Engineer who builds APIs'), 'no_evidence'),
+    (dict(suggested='Python', evidence_path='projects.0.tech', evidence_quote='FastAPI'), 'already_listed'),
+    (dict(suggested='FastAPI'), 'no_evidence'),
+])
+def test_added_skills_need_a_verbatim_cv_quotation_that_names_them(client, monkeypatch, change, reason):
+    d = _tailor_with(client, monkeypatch, [ProposedChange(op='add_skill', path='skills', reason='Job asks for it.', **change)])
+    assert d['suggestions'] == [] and d['proposalStats']['rejected'] == {reason: 1}
+
+
+def test_an_evidence_backed_skill_is_proposed_for_approval_with_its_evidence(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [ProposedChange(
+        op='add_skill', path='skills', suggested='FastAPI', reason='The job names FastAPI and your project uses it.',
+        evidence_path='projects.0.name', evidence_quote='FastAPI')], {
+        'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '', 'experience': [],
+        'projects': [{'id': '0', 'name': 'API', 'tech': 'FastAPI, MongoDB', 'description': 'A REST service'}],
+        'skills': ['Python']})
+    (s,) = d['suggestions']
+    assert (s['op'], s['risk'], s['skill'], s['suggested']) == ('add_skill', 'review', 'FastAPI', 'Python, FastAPI')
+    assert s['evidence'] == {'path': 'projects.0.tech', 'quote': 'FastAPI'}   # wrong field corrected within the same project
+
+
+def test_a_real_but_non_naming_quote_resolves_to_the_field_of_the_same_project_that_names_the_skill(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [ProposedChange(
+        op='add_skill', path='skills', suggested='Power BI', reason='The job prefers Power BI and your project uses it.',
+        evidence_path='projects.0.name', evidence_quote='Sales Insights')], {
+        'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '', 'experience': [],
+        'projects': [
+            {'id': '0', 'name': 'Sales Insights', 'tech': 'Power BI, SQL', 'description': 'Built a dashboard on sales data'},
+            {'id': '1', 'name': 'Other', 'tech': 'Tableau', 'description': 'Built dashboards'}],
+        'skills': ['Python']})
+    (s,) = d['suggestions']
+    assert s['evidence'] == {'path': 'projects.0.tech', 'quote': 'Power BI, SQL'} and s['suggested'] == 'Python, Power BI'
+
+
+def test_the_naming_fallback_never_crosses_into_another_project(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [ProposedChange(
+        op='add_skill', path='skills', suggested='Tableau', reason='x',
+        evidence_path='projects.0.name', evidence_quote='Sales Insights')], {
+        'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '', 'experience': [],
+        'projects': [{'id': '0', 'name': 'Sales Insights', 'tech': 'Power BI', 'description': 'Dashboards'},
+                     {'id': '1', 'name': 'Other', 'tech': 'Tableau', 'description': 'Built dashboards'}],
+        'skills': ['Python']})
+    assert d['suggestions'] == [] and d['proposalStats']['rejected'] == {'evidence_does_not_name_skill': 1}
+
+
+def test_zero_suggestions_is_a_valid_successful_draft(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [])
+    assert d['suggestions'] == [] and d['proposalStats'] == {'proposed': 0, 'kept': 0, 'rejected': {}}
+    assert d['id'] and d['sourceCvRevision']
+
+
+def test_match_context_for_ai_first_reports_carries_categories_statuses_evidence_and_duties():
+    from app.tailor.router import job_context_from_match
+    context = job_context_from_match({
+        'overallAssessment': 'Your CV clearly shows QA.',
+        'requirements': [
+            {'requirement': 'QA on annotated data', 'category': 'required', 'status': 'demonstrated',
+             'evidence': [{'path': 'experience.exp-1.bullets.0', 'quote': 'Reviewed 300+ annotated text samples'}]},
+            {'requirement': 'SQL', 'category': 'standard', 'status': 'not_shown', 'evidence': []},
+        ],
+        'excluded': [{'text': 'Build dashboards', 'reason': 'job_duty'}, {'text': 'Remote', 'reason': 'working_condition'}],
+    })
+    assert '- [required | demonstrated] QA on annotated data — evidence experience.exp-1.bullets.0: "Reviewed 300+' in context
+    assert '- [standard | not shown] SQL' in context and 'None' not in context
+    assert 'Role duties (context only' in context and '- Build dashboards' in context and 'Remote' not in context
+
+
+def test_missing_qualifications_come_from_the_match_report_only():
+    from app.tailor.router import missing_from_match
+    assert missing_from_match({'requirements': [
+        {'requirement': 'Python', 'status': 'demonstrated'}, {'requirement': 'SQL pipelines', 'status': 'partial'},
+        {'requirement': 'LLM evaluation', 'status': 'not_shown'}]}) == ['SQL pipelines', 'LLM evaluation']
+    assert missing_from_match({'partiallyMatched': [{'requirement': 'A'}], 'missing': [{'requirement': 'B'}]}) == ['A', 'B']
+    assert missing_from_match({}) == []
+
+
+def test_match_context_for_historical_reports_keeps_the_legacy_fallback():
+    from app.tailor.router import job_context_from_match
+    context = job_context_from_match({
+        'overallAssessment': 'The candidate fits.',
+        'matched': [{'requirement': 'Python', 'importance': 'required'}], 'missing': [{'requirement': 'Docker'}]})
+    assert '- [already matched] Python (required)' in context and '- [not shown in CV] Docker' in context and 'None' not in context
 
 
 # --- original unchanged / save / multiple versions / source deletion -------------
@@ -261,11 +393,8 @@ def test_dedup_cache(client, mock_ai):
 def test_match_reuse_path(client, monkeypatch):
     # Create a match (mocked), then tailor from it without a job description.
     from app.services.ai_matching import AnalysisResult
-    from app.matches.schemas import AiAnalysis, EvidenceStatus, Importance, RequirementAssessment
-    match_analysis = AiAnalysis(enough_info=True, overall_assessment='Good fit.', requirements=[
-        RequirementAssessment(requirement='Python', importance=Importance.required,
-                              status=EvidenceStatus.clearly_demonstrated, evidence='Built APIs'),
-    ])
+    from tests.test_matches import analysis
+    match_analysis = analysis()
     monkeypatch.setattr(ai_matching, 'analyze',
                         lambda *a, **k: AnalysisResult(analysis=match_analysis, usage=Usage(10, 10), model='mock'))
     monkeypatch.setattr(ai_tailoring, 'analyze',
@@ -276,6 +405,7 @@ def test_match_reuse_path(client, monkeypatch):
                       json={'cvId': cv, 'jobTitle': 'Backend Engineer', 'jobDescription': JOB}).json()['id']
     r = client.post(f'{BASE}/tailor', headers=h, json={'matchId': mid})
     assert r.status_code == 201 and r.json()['matchId'] == mid and r.json()['suggestions']
+    assert r.json()['missingQualifications'] == ['Docker']  # from the match report's verified statuses, not the model
     # A match belonging to another user cannot be used.
     bob = signup(client, 'bob@example.com')
     assert client.post(f'{BASE}/tailor', headers=bob, json={'matchId': mid}).status_code == 404
@@ -387,8 +517,8 @@ def test_new_job_draft_has_revision_and_target_metadata(client, mock_ai):
     assert created['id'] != previous['id']
     assert created['sourceCvId'] == cv and created['sourceCvRevision'] == source['contentRevision']
     assert created['suggestions'][1] == {
-        'id': 's1', 'section': 'experience', 'original': BULLET, 'suggested': BULLET + '.',
-        'explanation': 'Consistent bullet punctuation.', 'reviewRequired': False,
+        'id': 's1', 'section': 'experience', 'op': 'rewrite', 'original': BULLET, 'suggested': NEW_BULLET,
+        'explanation': 'Clearer for this job.', 'reviewRequired': True, 'risk': 'review', 'jobRequirement': 'Backend',
         'experienceId': '0', 'bulletIndex': 0,
     }
     retrieved = client.get(f'{BASE}/tailor/{created["id"]}', headers=h).json()

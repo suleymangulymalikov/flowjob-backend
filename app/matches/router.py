@@ -13,16 +13,11 @@ from app.config import settings
 from app.cv.http import checked_saved_content
 from app.cv.revision import content_revision
 from app.integration.models import SavedCv
+from app.ai_matching.matching import build_report, render_cv
 from app.matches.models import MatchRecord
-from app.matches.schemas import (
-    ANALYSIS_VERSION,
-    PROMPT_VERSION,
-    AiAnalysis,
-    CreateMatch,
-    EvidenceStatus,
-)
-from app.matches.scoring import compute_score, explain, verdict_for
+from app.matches.schemas import CreateMatch
 from app.services import ai_matching
+from app.services.ai_matching import PROMPT_VERSION
 from app.services.ai_cache import cache_model, coalesce_request, job_fingerprint
 from app.services.ai_provider import AiError, error_response, estimate_cost_usd
 from app.services.ai_quota import generation_quota
@@ -32,87 +27,11 @@ router = APIRouter(prefix='/api/v1', tags=['matches'])
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-# --- CV evidence (PII minimized) -------------------------------------------------
-
-def cv_evidence(content: dict[str, Any]) -> str:
-    """Relevant CV content for matching, excluding name, email, phone, location and links."""
-    c = content or {}
-    lines: list[str] = []
-    if c.get('summary'):
-        lines.append(f'Summary: {c["summary"]}')
-    if c.get('experience'):
-        lines.append('Experience:')
-        for e in c['experience']:
-            dates = ' '.join(x for x in [e.get('start', ''), e.get('end', '')] if x)
-            head = f'- {e.get("title", "")} at {e.get("company", "")}'
-            lines.append(head + (f' ({dates})' if dates else ''))
-            for b in e.get('bullets') or []:
-                if b:
-                    lines.append(f'    • {b}')
-    if c.get('education'):
-        lines.append('Education:')
-        for e in c['education']:
-            note = f' — {e.get("note")}' if e.get('note') else ''
-            lines.append(f'- {e.get("degree", "")}, {e.get("school", "")}{note}')
-    if c.get('projects'):
-        lines.append('Projects:')
-        for p in c['projects']:
-            tech = f' [{p.get("tech")}]' if p.get('tech') else ''
-            desc = f': {p.get("description")}' if p.get('description') else ''
-            lines.append(f'- {p.get("name", "")}{tech}{desc}')
-    if c.get('skills'):
-        lines.append('Skills: ' + ', '.join(c['skills']))
-    if c.get('languages'):
-        lines.append(f'Languages: {c["languages"]}')
-    return '\n'.join(lines).strip()
-
-
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
 # --- presentation ----------------------------------------------------------------
-
-def _req_dto(r) -> dict[str, Any]:
-    return {
-        'requirement': r.requirement,
-        'importance': r.importance.value,
-        'status': r.status.value,
-        'evidence': r.evidence,
-    }
-
-
-def build_result(analysis: AiAnalysis, score: int | None, model: str) -> dict[str, Any]:
-    reqs = analysis.requirements
-    matched = [_req_dto(r) for r in reqs if r.status == EvidenceStatus.clearly_demonstrated]
-    partial = [_req_dto(r) for r in reqs if r.status == EvidenceStatus.partially_demonstrated]
-    missing = [
-        _req_dto(r)
-        for r in reqs
-        if r.status in (EvidenceStatus.not_mentioned, EvidenceStatus.uncertain)
-    ]
-    return {
-        'scoreAvailable': score is not None,
-        'verdict': verdict_for(score),
-        'summary': analysis.overall_assessment,  # legacy field
-        'overallAssessment': analysis.overall_assessment,
-        'scoreExplanation': explain(analysis, score),
-        'matched': matched,
-        'partiallyMatched': partial,
-        'missing': missing,
-        # Legacy compatibility for the existing UI/demo shapes.
-        'strengths': [{'skill': r['requirement'], 'evidence': r['evidence']} for r in matched],
-        'gaps': [{'skill': r['requirement'], 'tip': r['evidence']} for r in missing],
-        'areasToImprove': analysis.areas_to_improve,
-        'recommendations': analysis.recommendations,
-        'suggestedWording': [
-            {'section': s.section, 'suggestion': s.suggestion} for s in analysis.suggested_wording
-        ],
-        'questions': analysis.clarifying_questions,
-        'model': model,
-        'analysisVersion': ANALYSIS_VERSION,
-    }
-
 
 def present(record: MatchRecord) -> dict[str, Any]:
     return {
@@ -153,8 +72,8 @@ async def create_match(data: CreateMatch, user: CurrentUser):
         raise HTTPException(422, 'That job description is too long; please shorten it.')
 
     cv = await owned_cv(data.cvId, user)
-    evidence = cv_evidence(checked_saved_content(cv.content))
-    cv_hash = _sha(evidence)
+    content = checked_saved_content(cv.content)
+    cv_hash = _sha(render_cv(content))  # the PII-free, path-tagged rendering the model sees
     revision = content_revision(cv.content)
     job_title = data.jobTitle.strip()
     job_hash = job_fingerprint(job_title, data.company, data.jobUrl, job)
@@ -181,14 +100,15 @@ async def create_match(data: CreateMatch, user: CurrentUser):
             try:
                 # Billable call runs off the event loop. Tests monkeypatch ai_matching.analyze.
                 out = await run_in_threadpool(
-                    ai_matching.analyze, job_title, data.company, job, evidence
+                    ai_matching.analyze, job_title, data.company, job, content
                 )
             except AiError as error:
                 status, message = error_response(error)
                 raise HTTPException(status, message) from error
 
-            score = compute_score(out.analysis)
-            result = build_result(out.analysis, score, out.model)
+            # The backend checks every job quote and CV citation and computes the score itself.
+            result = build_report(out.analysis, content, job, out.model)
+            score = result['score']
             record = MatchRecord(
                 user_id=user.id,
                 cv_id=cv.id,
