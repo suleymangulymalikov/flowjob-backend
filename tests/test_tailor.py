@@ -234,6 +234,30 @@ def test_an_evidence_backed_skill_is_proposed_for_approval_with_its_evidence(cli
     assert s['evidence'] == {'path': 'projects.0.tech', 'quote': 'FastAPI'}   # wrong field corrected within the same project
 
 
+def test_a_real_but_non_naming_quote_resolves_to_the_field_of_the_same_project_that_names_the_skill(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [ProposedChange(
+        op='add_skill', path='skills', suggested='Power BI', reason='The job prefers Power BI and your project uses it.',
+        evidence_path='projects.0.name', evidence_quote='Sales Insights')], {
+        'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '', 'experience': [],
+        'projects': [
+            {'id': '0', 'name': 'Sales Insights', 'tech': 'Power BI, SQL', 'description': 'Built a dashboard on sales data'},
+            {'id': '1', 'name': 'Other', 'tech': 'Tableau', 'description': 'Built dashboards'}],
+        'skills': ['Python']})
+    (s,) = d['suggestions']
+    assert s['evidence'] == {'path': 'projects.0.tech', 'quote': 'Power BI, SQL'} and s['suggested'] == 'Python, Power BI'
+
+
+def test_the_naming_fallback_never_crosses_into_another_project(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [ProposedChange(
+        op='add_skill', path='skills', suggested='Tableau', reason='x',
+        evidence_path='projects.0.name', evidence_quote='Sales Insights')], {
+        'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '', 'experience': [],
+        'projects': [{'id': '0', 'name': 'Sales Insights', 'tech': 'Power BI', 'description': 'Dashboards'},
+                     {'id': '1', 'name': 'Other', 'tech': 'Tableau', 'description': 'Built dashboards'}],
+        'skills': ['Python']})
+    assert d['suggestions'] == [] and d['proposalStats']['rejected'] == {'evidence_does_not_name_skill': 1}
+
+
 def test_zero_suggestions_is_a_valid_successful_draft(client, monkeypatch):
     d = _tailor_with(client, monkeypatch, [])
     assert d['suggestions'] == [] and d['proposalStats'] == {'proposed': 0, 'kept': 0, 'rejected': {}}

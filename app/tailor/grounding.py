@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.experiment.matching import Citation, _fold, resolve_citation
+from app.experiment.matching import Citation, _fold, _items, resolve_citation
 from app.tailor.schemas import ProposedChange
 
 _BULLET_PATH = re.compile(r'^experience\.(?P<id>.+)\.bullets\.(?P<n>\d+)$')
@@ -41,6 +41,17 @@ def _names(skill: str, quote: str) -> bool:
     """The skill is named in the quotation (whole words; spacing/punctuation inside the name is flexible)."""
     parts = [re.escape(p) for p in re.findall(r'[0-9a-z+#]+', _fold(skill))]
     return bool(parts) and bool(re.search(r'(?<![0-9a-z])' + r'[\s\-_.]*'.join(parts) + r'(?![0-9a-z])', _fold(quote)))
+
+
+def _field_naming(content: dict[str, Any], path: str, skill: str) -> tuple[str, str] | None:
+    """When the cited quote is real but does not itself contain the skill, use the shortest other field of the SAME
+    role/project/education entry that does (e.g. the project's `tech` for a quote taken from its `name`)."""
+    parts = path.split('.')
+    if len(parts) < 3 or parts[0] not in ('experience', 'education', 'projects'):
+        return None
+    entry = '.'.join(parts[:2]) + '.'
+    hits = [(p, t) for p, t in _items(content).items() if p.startswith(entry) and _names(skill, t)]
+    return min(hits, key=lambda pair: len(pair[1])) if hits else None
 
 
 def _section_fields(path: str, content: dict[str, Any]) -> dict[str, Any] | None:
@@ -150,6 +161,9 @@ def ground(content: dict[str, Any], change: ProposedChange) -> tuple[dict[str, A
     if resolved is None:
         return None, 'evidence_not_in_cv'
     if not _names(skill, quote):
-        return None, 'evidence_does_not_name_skill'
+        better = _field_naming(content, resolved, skill)
+        if better is None:
+            return None, 'evidence_does_not_name_skill'
+        resolved, quote = better[0], better[1][:240]
     return {**out, 'original': ', '.join(skills), 'suggested': ', '.join([*skills, skill]), 'skill': skill,
             'evidence': {'path': resolved, 'quote': quote.strip()}}, None
