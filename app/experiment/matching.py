@@ -1,4 +1,7 @@
-"""AI-first Job Matching prototype (experiment; not wired to any route).
+"""AI-first Job Matching: the contract, prompt, verification and deterministic scoring (also reused by Tailoring).
+
+The package keeps its original name, `app.experiment`; a rename to a permanent package name is a pending, purely mechanical
+follow-up.
 
 Division of labour
 ------------------
