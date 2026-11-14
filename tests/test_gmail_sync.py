@@ -6,7 +6,7 @@ import pytest
 from app.config import settings
 from app.gmail import sync
 from app.gmail.connection import acquire_lock, disconnect
-from app.gmail.google import GoogleUnavailable, InvalidGrant, MessageGone
+from app.gmail.google import GoogleRejected, GoogleUnavailable, InvalidGrant, MessageGone
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview, SchedulerLease
 from app.gmail.preprocess import is_candidate, minimize
 from app.gmail.scheduler import GmailScheduler
@@ -169,12 +169,15 @@ def test_failure_during_enumeration_resumes_from_saved_page(client, fake_google,
     headers = signup(client)
     connect(client, headers)
     conn = the_conn(client)
-    assert conn.attention == 'gmail_unavailable' and conn.page_token == '1' and conn.cursor_at is None
+    # A temporary Gmail failure: no attention needed, a backoff retry is scheduled instead.
+    assert conn.attention is None and conn.retry_at is not None and conn.transient_failures == 1
+    assert conn.page_token == '1' and conn.cursor_at is None
     assert len(ledger(client)) == 10  # the first page is durable
     fake_google.fail_list_after_pages = None
     manual(client, conn.id)
     conn = the_conn(client)
     assert conn.attention is None and conn.cursor_at is not None
+    assert conn.retry_at is None and conn.transient_failures == 0
     assert len(set(recorder.seen)) == 25
 
 
@@ -277,11 +280,11 @@ def test_failed_messages_wait_for_manual_retry(client, fake_google, recorder):
 
 def test_connection_wide_failure_needs_attention_and_scheduler_skips(client, fake_google, recorder):
     headers = signup(client)
-    fake_google.list_error = GoogleUnavailable()
+    fake_google.list_error = GoogleRejected()  # permanent: Gmail refused access
     connect(client, headers)
     conn = the_conn(client)
     status = client.get(f'{BASE}/gmail', headers=headers).json()['sync']
-    assert status['needsAttention'] == 'gmail_unavailable' and status['error']['code'] == 'gmail_unavailable'
+    assert status['needsAttention'] == 'gmail_rejected' and status['error']['code'] == 'gmail_rejected'
     run(client, GmailConnection.get_pymongo_collection().update_one(
         {'_id': conn.id}, {'$set': {'last_sync_started_at': datetime.now(UTC) - timedelta(hours=4)}}))
     calls = fake_google.list_calls

@@ -14,7 +14,7 @@ from app.gmail import classify, reconcile
 from app.gmail.google import GoogleError, MessageGone, api
 from app.gmail.models import GmailMessage
 from app.gmail.preprocess import minimize
-from app.gmail.sync import MessageFailed, StopRun, SyncContext
+from app.gmail.sync import MessageFailed, StopRun, SyncContext, google_stop
 from app.services import ai_gmail
 from app.services.ai_provider import AiError, AiNotConfigured, AiRateLimited
 from app.services.ai_quota import generation_quota
@@ -28,7 +28,7 @@ async def analyze_message(ctx: SyncContext, msg: GmailMessage) -> dict | None:
     except MessageGone:
         return None
     except GoogleError as error:
-        raise StopRun(error.code, attention=True) from None
+        raise google_stop(error) from None
     user = await User.get(conn.user_id)
     if user is None:
         raise StopRun('sync_error', attention=True)

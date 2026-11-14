@@ -36,6 +36,10 @@ class GmailConnection(Document):
     cursor_at: datetime | None = None  # end of the last fully enumerated window
     # Set when a connection-wide failure needs the user (manual Sync now / Retry); the scheduler skips it.
     attention: str | None = None
+    # Temporary Google failures (network, 5xx, rate limits): the scheduler retries at ``retry_at`` (exponential
+    # backoff, never before Google's Retry-After); after too many in a row the connection needs attention.
+    retry_at: datetime | None = None
+    transient_failures: int = 0
     last_error: dict[str, Any] | None = None  # {code, at}; never provider bodies or email text
     last_run: dict[str, Any] | None = None
     last_sync_started_at: datetime | None = None

@@ -14,7 +14,9 @@ expired, was taken over or was revoked by a disconnect stops before writing):
 
 States: ``discovered``/``analyzed`` = eligible work; ``processed``/``skipped``/``gone`` = done; ``failed`` =
 awaits a manual Retry sync (never requeued by the scheduler); connection ``attention`` = a connection-wide
-failure that needs the user, which the scheduler will not repeat.
+failure that needs the user, which the scheduler will not repeat. Temporary Google failures (network, 5xx, 429,
+rate-limit 403) instead set ``retry_at`` with exponential backoff (respecting Retry-After) for at most
+``MAX_TRANSIENT_FAILURES`` automatic retries in a row.
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ from app.config import settings
 from app.gmail.connection import (
     access_token, acquire_lock, as_utc, now, purge_if_disconnected, release_lock, renew_lock,
 )
-from app.gmail.google import GmailBadRequest, GoogleError, InvalidGrant, MessageGone, api
+from app.gmail.google import GmailBadRequest, GoogleError, GoogleUnavailable, InvalidGrant, MessageGone, api
 from app.gmail.crypto import TokenCryptoError
 from app.gmail.models import GmailConnection, GmailMessage
 from app.gmail.preprocess import internal_at, is_candidate
@@ -49,12 +51,37 @@ class Fenced(Exception):
 
 
 class StopRun(Exception):
-    """Stop the whole run. ``attention`` marks a connection-wide problem that needs a manual sync."""
+    """Stop the whole run. ``attention`` marks a connection-wide problem that needs a manual sync; ``transient``
+    marks a temporary Google failure that the scheduler retries later with backoff (no user action needed)."""
 
-    def __init__(self, code: str, *, attention: bool):
+    def __init__(self, code: str, *, attention: bool, transient: bool = False, retry_after: float | None = None):
         super().__init__(code)
         self.code = code
         self.attention = attention
+        self.transient = transient
+        self.retry_after = retry_after
+
+
+def google_stop(error: GoogleError) -> StopRun:
+    """Map a Google error to how the run stops: temporary failures back off, everything else needs the user."""
+    if isinstance(error, GoogleUnavailable):
+        return StopRun(error.code, attention=False, transient=True, retry_after=error.retry_after)
+    if isinstance(error, MessageGone):  # a listing never returns 404 for a valid mailbox: treat as temporary
+        return StopRun('gmail_unavailable', attention=False, transient=True)
+    return StopRun(error.code, attention=True)
+
+
+# Backoff for consecutive temporary failures: 15 min, 30 min, 1 h, 2 h, 4 h; then the connection needs a manual
+# Sync now (bounded retries: at most MAX_TRANSIENT_FAILURES automatic attempts per incident).
+BACKOFF_BASE = timedelta(minutes=15)
+MAX_TRANSIENT_FAILURES = 5
+
+
+def backoff(failures: int, retry_after: float | None) -> timedelta:
+    wait = BACKOFF_BASE * (2 ** max(failures - 1, 0))
+    if retry_after:
+        wait = max(wait, timedelta(seconds=retry_after))  # never earlier than Google asked
+    return wait
 
 
 class MessageFailed(Exception):
@@ -101,8 +128,8 @@ class SyncContext:
                 self.token = await access_token(self.connection)
             except InvalidGrant:
                 raise StopRun('reauth_required', attention=False) from None
-            except GoogleError:
-                raise StopRun('gmail_unavailable', attention=True) from None
+            except GoogleError as error:
+                raise google_stop(error) from None
             self.token_at = now()
         return self.token
 
@@ -197,7 +224,10 @@ async def _run(conn_id: PydanticObjectId, owner: str, summary: RunSummary, retry
     coll = GmailConnection.get_pymongo_collection()
     started: dict[str, Any] = {'last_sync_started_at': now()}
     if summary.trigger != 'scheduled':
-        started['attention'] = None  # a user-started sync is the manual recovery for a connection-wide failure
+        # A user-started sync is the manual recovery for a connection-wide failure; it also starts a fresh,
+        # bounded backoff sequence if Gmail is still temporarily unavailable.
+        started.update({'attention': None, 'transient_failures': 0})
+        conn.transient_failures = 0
     await coll.update_one({'_id': conn_id, 'lock_owner': owner}, {'$set': started})
 
     messages = GmailMessage.get_pymongo_collection()
@@ -223,9 +253,8 @@ async def _run(conn_id: PydanticObjectId, owner: str, summary: RunSummary, retry
         summary.stoppedReason = 'reauth_required'
         await _finish(conn_id, owner, summary)
         return
-    except GoogleError:
-        summary.stoppedReason = 'gmail_unavailable'
-        await _finish(conn_id, owner, summary, attention='gmail_unavailable')
+    except GoogleError as error:
+        await _stopped(conn, owner, summary, google_stop(error))
         return
 
     ctx = SyncContext(connection=conn, owner=owner, token=token, summary=summary)
@@ -233,17 +262,33 @@ async def _run(conn_id: PydanticObjectId, owner: str, summary: RunSummary, retry
         enumerated = await _enumerate(ctx)
         await _process(ctx)
     except StopRun as stop:
-        summary.stoppedReason = stop.code
-        await _finish(conn_id, owner, summary, attention=stop.code if stop.attention else None)
+        await _stopped(conn, owner, summary, stop)
         return
 
     await ctx.fence()
     remaining = await messages.count_documents(
         {'connection_id': conn_id, 'state': {'$in': ['discovered', 'analyzed', 'processing']}})
-    extra: dict[str, Any] = {}
+    # A completed run ends any temporary-failure incident.
+    extra: dict[str, Any] = {'retry_at': None, 'transient_failures': 0}
     if enumerated and remaining == 0:
-        extra = {'backfill_done': True, 'phase': 'incremental'}
+        extra |= {'backfill_done': True, 'phase': 'incremental'}
     await _finish(conn_id, owner, summary, success=True, extra=extra)
+
+
+async def _stopped(conn: GmailConnection, owner: str, summary: RunSummary, stop: StopRun) -> None:
+    """Record why a run stopped. Temporary Google failures schedule a backoff retry; after MAX_TRANSIENT_FAILURES
+    consecutive ones the connection needs a manual Sync now (no endless automatic retries)."""
+    summary.stoppedReason = stop.code
+    if not stop.transient:
+        await _finish(conn.id, owner, summary, attention=stop.code if stop.attention else None)
+        return
+    failures = (conn.transient_failures or 0) + 1
+    if failures > MAX_TRANSIENT_FAILURES:
+        await _finish(conn.id, owner, summary, attention=stop.code,
+                      extra={'retry_at': None, 'transient_failures': failures})
+        return
+    await _finish(conn.id, owner, summary,
+                  extra={'retry_at': now() + backoff(failures, stop.retry_after), 'transient_failures': failures})
 
 
 # --- enumeration -------------------------------------------------------------------------------------------------
@@ -283,7 +328,7 @@ async def _enumerate(ctx: SyncContext) -> bool:
                 continue
             raise StopRun('gmail_bad_request', attention=True) from None
         except GoogleError as error:
-            raise StopRun(error.code if error.code != 'message_gone' else 'gmail_unavailable', attention=True) from None
+            raise google_stop(error) from None
         await ctx.fence()
         for ref in listing.get('messages') or []:
             await _record(ctx, ref)
@@ -311,7 +356,7 @@ async def _record(ctx: SyncContext, ref: dict[str, Any]) -> None:
     except MessageGone:
         return  # deleted between listing and fetching
     except GoogleError as error:
-        raise StopRun(error.code, attention=True) from None
+        raise google_stop(error) from None
     candidate = is_candidate(meta, ctx.connection.email)
     ctx.summary.candidates += int(candidate)
     await ctx.fence()

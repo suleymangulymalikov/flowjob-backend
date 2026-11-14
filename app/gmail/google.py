@@ -10,6 +10,8 @@ import asyncio
 import base64
 import hashlib
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -42,7 +44,67 @@ class InvalidGrant(GoogleError):
 
 
 class GoogleUnavailable(GoogleError):
+    """Temporary: network failure, timeout or a Google 5xx. Retried on a later run with backoff."""
+
     code = 'gmail_unavailable'
+
+    def __init__(self, retry_after: float | None = None) -> None:
+        super().__init__(self.code)
+        self.retry_after = retry_after  # seconds Google asked us to wait (Retry-After), if any
+
+
+class GoogleRateLimited(GoogleUnavailable):
+    """Temporary: HTTP 429, or a 403 whose reason is a rate/quota limit."""
+
+    code = 'gmail_rate_limited'
+
+
+# Gmail/Google reasons in a 403 body that mean "slow down", not "you are not allowed".
+RATE_LIMIT_REASONS = frozenset({'ratelimitexceeded', 'userratelimitexceeded', 'quotaexceeded',
+                                'dailylimitexceeded', 'resource_exhausted'})
+MAX_RETRY_AFTER_SECONDS = 24 * 3600
+
+
+def retry_after(response: httpx.Response) -> float | None:
+    """Seconds from a Retry-After header (delta-seconds or HTTP date), capped; None when absent or invalid."""
+    value = (response.headers.get('retry-after') or '').strip()
+    if not value:
+        return None
+    if value.isdigit():
+        seconds = float(value)
+    else:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when is None:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
+
+
+def is_rate_limit(response: httpx.Response) -> bool:
+    """True for a 403/400 whose Google error reason is a rate or quota limit. Reads only the reason enums."""
+    try:
+        error = response.json().get('error')
+    except ValueError:
+        return False
+    if not isinstance(error, dict):
+        return False
+    reasons = {str(e.get('reason', '')).lower() for e in error.get('errors') or [] if isinstance(e, dict)}
+    reasons.add(str(error.get('status', '')).lower())
+    return bool(reasons & RATE_LIMIT_REASONS)
+
+
+def temporary_error(response: httpx.Response) -> GoogleUnavailable | None:
+    """The temporary error for this response, or None when it is not temporary."""
+    if response.status_code == 429 or (response.status_code == 403 and is_rate_limit(response)):
+        return GoogleRateLimited(retry_after(response))
+    if response.status_code >= 500:
+        return GoogleUnavailable(retry_after(response))
+    return None
 
 
 class GoogleRejected(GoogleError):
@@ -134,8 +196,8 @@ class GoogleApi:
             'grant_type': 'authorization_code',
             'code_verifier': verifier,
         })
-        if response.status_code >= 500:
-            raise GoogleUnavailable()
+        if (temporary := temporary_error(response)) is not None:
+            raise temporary
         if response.status_code != 200:
             raise GoogleRejected()
         return _token_response(response.json())
@@ -147,8 +209,8 @@ class GoogleApi:
             'refresh_token': refresh_token,
             'grant_type': 'refresh_token',
         })
-        if response.status_code >= 500:
-            raise GoogleUnavailable()
+        if (temporary := temporary_error(response)) is not None:
+            raise temporary
         if response.status_code != 200:
             try:
                 error = response.json().get('error')
@@ -159,12 +221,19 @@ class GoogleApi:
             raise GoogleRejected()
         return _token_response(response.json())
 
-    async def revoke(self, token: str) -> None:
-        """Best effort. Only ever called for a token owned by the disconnecting user."""
-        try:
-            await self._post_form(REVOKE_URL, {'token': token})
-        except GoogleError:
-            pass
+    async def revoke(self, token: str) -> bool:
+        """Best effort. Only ever called for a token owned by the disconnecting user. True when Google confirms the
+        grant is gone (revoked now, or already invalid); False otherwise. Raises GoogleUnavailable on network errors.
+        """
+        response = await self._post_form(REVOKE_URL, {'token': token})
+        if response.status_code == 200:
+            return True
+        if response.status_code == 400:
+            try:
+                return response.json().get('error') == 'invalid_token'  # already revoked or expired
+            except ValueError:
+                return False
+        return False
 
     def _verify_id_token_sync(self, token: str, nonce: str) -> Identity:
         if self._jwks is None:
@@ -192,8 +261,10 @@ class GoogleApi:
             raise GoogleUnavailable() from None
         if response.status_code == 404:
             raise MessageGone()
+        if (temporary := temporary_error(response)) is not None:
+            raise temporary  # 429, rate-limit 403, 5xx: retried later, never "reconnect"
         if response.status_code in (401, 403):
-            raise GoogleRejected()
+            raise GoogleRejected()  # permanent: authorization or permission refused
         if response.status_code == 400:
             raise GmailBadRequest()
         if response.status_code != 200:
@@ -222,6 +293,10 @@ def check_claims(claims: dict[str, Any], nonce: str) -> Identity:
         raise IdTokenInvalid()
     sub, email = claims.get('sub'), claims.get('email')
     if not isinstance(sub, str) or not sub or not isinstance(email, str) or '@' not in email:
+        raise IdTokenInvalid()
+    # Ownership is keyed on ``sub``; the address is only displayed and used as a login hint, but it must still be
+    # one Google has verified (Gmail addresses always are). Google sends a boolean; tolerate the string form.
+    if claims.get('email_verified') not in (True, 'true'):
         raise IdTokenInvalid()
     return Identity(sub=sub, email=email.lower())
 

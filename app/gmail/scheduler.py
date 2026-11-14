@@ -1,8 +1,9 @@
 """In-process Gmail scheduler (no separate worker service, Redis, Celery or Pub/Sub).
 
 Started from the FastAPI lifespan only when GMAIL_SCHEDULER_ENABLED=true. Every tick, the process that holds the
-MongoDB lease ``gmail-scheduler`` syncs each active connection whose last sync started more than
-``gmail_sync_interval_hours`` ago and that does not need the user's attention. Under ``uvicorn --reload`` only the
+MongoDB lease ``gmail-scheduler`` first finishes interrupted disconnects, then syncs each active connection that does
+not need the user's attention and is due: its backoff after a temporary Gmail failure has passed, or (without a
+pending backoff) its last sync started more than ``gmail_sync_interval_hours`` ago. Under ``uvicorn --reload`` only the
 serving child runs the lifespan; with several workers only the lease owner works, and the per-connection lock still
 prevents any overlap with manual syncs. Shutdown cancels the loop and releases the lease (a crash lets it expire).
 Synchronization only happens while the backend is running.
@@ -19,7 +20,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.config import settings
 from app.gmail import sync
-from app.gmail.connection import now
+from app.gmail.connection import finish_abandoned_disconnects, now
 from app.gmail.models import GmailConnection, SchedulerLease
 
 _log = logging.getLogger(__name__)
@@ -52,10 +53,16 @@ class GmailScheduler:
         await SchedulerLease.get_pymongo_collection().delete_one({'_id': LEASE_ID, 'owner': self.owner})
 
     async def due_connections(self) -> list:
-        cutoff = now() - timedelta(hours=settings.gmail_sync_interval_hours)
+        t = now()
+        cutoff = t - timedelta(hours=settings.gmail_sync_interval_hours)
         cursor = GmailConnection.get_pymongo_collection().find(
-            {'status': 'active', 'attention': None,
-             '$or': [{'last_sync_started_at': None}, {'last_sync_started_at': {'$lte': cutoff}}]},
+            {'status': 'active', 'attention': None, '$or': [
+                # Waiting for a backoff after a temporary Gmail failure: due when the backoff has passed.
+                {'retry_at': {'$ne': None, '$lte': t}},
+                # Normal cadence (no pending backoff).
+                {'retry_at': None, 'last_sync_started_at': None},
+                {'retry_at': None, 'last_sync_started_at': {'$lte': cutoff}},
+            ]},
             {'_id': 1},
         ).sort('last_sync_started_at', 1).limit(100)
         return [row['_id'] async for row in cursor]
@@ -63,6 +70,7 @@ class GmailScheduler:
     async def tick(self) -> int:
         if not await self.hold_lease():
             return 0
+        await finish_abandoned_disconnects()
         ran = 0
         for conn_id in await self.due_connections():
             if not await self.hold_lease():

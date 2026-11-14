@@ -258,8 +258,14 @@ def auto_import_ok(item: dict[str, Any]) -> tuple[bool, str]:
     return False, 'weak_evidence'
 
 
-def possible_reapplication(item: dict[str, Any], app: Application, via: str, state: UserState) -> bool:
+def possible_reapplication(item: dict[str, Any], app: Application, via: str, state: UserState,
+                           msg: GmailMessage) -> bool:
     if item['kind'] != 'submitted_application' or via in ('thread', 'reference'):
+        return False
+    # An email from before the user's latest status decision on this application (a manual change or an approved
+    # suggestion) is part of its known history, typically re-read after a reconnect: never a new application.
+    basis = as_utc(app.status_basis_at)
+    if basis and as_utc(msg.internal_at) <= basis:
         return False
     if status_value(app) in TERMINAL:
         return True
@@ -293,7 +299,8 @@ async def upsert_event(conn: GmailConnection, msg: GmailMessage, item: dict[str,
         existing = await ApplicationEvent.find_one(
             ApplicationEvent.user_id == conn.user_id, ApplicationEvent.message_id == msg.message_id,
             ApplicationEvent.item_key == item['key'], ignore_cache=True)
-        assert existing is not None
+        if existing is None:  # the conflicting row vanished (e.g. a concurrent purge): fail this message cleanly
+            raise RuntimeError('activity write conflict')
         return existing
     # The user may have deleted the application meanwhile: never leave orphan activity.
     if not await Application.find_one(Application.id == event.application_id, ignore_cache=True).exists():
@@ -429,7 +436,7 @@ async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
 
     if res.kind == 'linked':
         app = res.app
-        if possible_reapplication(item, app, res.via or '', state):
+        if possible_reapplication(item, app, res.via or '', state, msg):
             proposal = application_proposal(conn, msg, item, 'possible_reapplication')
             if await add_review(conn, msg, item, 'new_application', candidates=[app], proposal=proposal):
                 effects.reviews += 1
@@ -458,6 +465,7 @@ async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
     effects.imported += 1
     event = await upsert_event(conn, msg, item, app.id)
     effects.activities += 1
+    await schedule_issue_review(conn, msg, item, app.id, event, effects)
     await propose_status(conn, msg, item, app, event, effects)
     return 'imported', reason
 
@@ -475,7 +483,22 @@ async def link_event(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
         if await add_review(conn, msg, item, 'schedule_change', application_id=app.id,
                             source_event_id=event.id, proposal=proposal):
             effects.reviews += 1
+    await schedule_issue_review(conn, msg, item, app.id, event, effects)
     await propose_status(conn, msg, item, app, event, effects)
+
+
+async def schedule_issue_review(conn: GmailConnection, msg: GmailMessage, item: dict[str, Any], app_id,
+                                event: ApplicationEvent, effects: Effects) -> None:
+    """The email states a date-time that could not be converted safely (unsupported or conflicting zone, a DST
+    gap or overlap): record the activity without a time and let the user set it in Needs Review."""
+    if not item.get('schedule_issue') or event.state != 'active' or event.scheduled_at is not None:
+        return
+    proposal = {'scheduledAt': None, 'scheduledTz': None, 'previousScheduledAt': None,
+                'eventType': item['event_type'], 'timeIssue': item['schedule_issue'],
+                'statedTime': item.get('stated_time')}
+    if await add_review(conn, msg, item, 'schedule_change', application_id=app_id, source_event_id=event.id,
+                        proposal=proposal):
+        effects.reviews += 1
 
 
 async def recover_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, Any], state: UserState,

@@ -27,12 +27,18 @@ _log = logging.getLogger(__name__)
 ERROR_MESSAGES = {
     'reauth_required': 'Google access expired. Reconnect Gmail to continue.',
     'gmail_unavailable': 'Gmail could not be reached. Try Sync now later.',
+    'gmail_rate_limited': 'Gmail asked FlowJob to slow down. Try Sync now later.',
     'gmail_rejected': 'Gmail refused the request. Reconnect Gmail if this continues.',
     'ai_unavailable': 'Email analysis is unavailable right now. Try Sync now later.',
     'quota_reached': 'Today\'s email analysis limit was reached. Remaining emails continue on the next sync.',
     'sync_error': 'The sync stopped unexpectedly. Try Sync now.',
     'gmail_bad_request': 'Gmail rejected the search. Try Sync now; reconnect Gmail if this continues.',
     'config_error': 'Gmail is misconfigured on this server. Contact the FlowJob administrator.',
+}
+TEMPORARY_CODES = frozenset({'gmail_unavailable', 'gmail_rate_limited'})
+TEMPORARY_AUTO_RETRY = {
+    'gmail_unavailable': 'Gmail could not be reached. FlowJob retries automatically; no need to reconnect.',
+    'gmail_rate_limited': 'Gmail asked FlowJob to slow down. FlowJob retries automatically after a pause.',
 }
 
 
@@ -46,7 +52,12 @@ def _iso(value) -> str | None:
 
 
 async def gmail_status(user: User) -> dict[str, Any]:
-    conn = await connection_for(user.id)
+    raw = await GmailConnection.find_one(GmailConnection.user_id == user.id, ignore_cache=True)
+    if raw is not None and raw.status == 'disconnecting':
+        # A disconnect is running or was interrupted: its data is being erased. The UI offers a safe retry.
+        return {'available': gmail_ready(), 'pendingReviewCount': 0,
+                'connection': {'state': 'disconnecting'}, 'sync': None}
+    conn = raw
     pending = await GmailReview.find(GmailReview.user_id == user.id, GmailReview.state == 'pending').count()
     base: dict[str, Any] = {'available': gmail_ready(), 'pendingReviewCount': pending}
     if conn is None:
@@ -65,6 +76,12 @@ async def gmail_status(user: User) -> dict[str, Any]:
     code = conn.attention or (conn.last_run or {}).get('stoppedReason')
     error = {'code': code, 'message': ERROR_MESSAGES.get(code, ERROR_MESSAGES['sync_error'])} \
         if code in ERROR_MESSAGES else None
+    retry_at = as_utc(conn.retry_at)
+    if error and code in TEMPORARY_CODES:
+        if conn.attention:
+            error['message'] = 'Gmail has been unavailable for several attempts. Try Sync now later.'
+        elif retry_at and settings.gmail_scheduler_enabled:
+            error['message'] = TEMPORARY_AUTO_RETRY[code]
     return {
         **base,
         'connection': {
@@ -83,6 +100,8 @@ async def gmail_status(user: User) -> dict[str, Any]:
             'processed': counts['processed'],
             'needsAttention': conn.attention,
             'error': error,
+            # Next automatic retry after a temporary Gmail failure (only meaningful with the scheduler enabled).
+            'retryAt': _iso(retry_at) if settings.gmail_scheduler_enabled else None,
             'lastRun': conn.last_run,
         },
     }
@@ -168,6 +187,12 @@ async def start_sync(user: CurrentUser, data: SyncInput | None = None):
         raise HTTPException(409, 'Google access expired. Reconnect Gmail to continue.')
     interval = timedelta(seconds=settings.gmail_manual_sync_min_interval_seconds)
     t = now()
+    retry_at = as_utc(conn.retry_at)
+    if retry_at and retry_at > t and (conn.last_run or {}).get('stoppedReason') == 'gmail_rate_limited':
+        # Gmail asked us to wait: respect it for manual syncs too.
+        wait = max(1, int((retry_at - t).total_seconds()))
+        raise HTTPException(429, 'Gmail asked FlowJob to slow down. Try again later.',
+                            headers={'Retry-After': str(wait)})
     claimed = await GmailConnection.get_pymongo_collection().update_one(
         {'_id': conn.id, 'status': 'active',
          '$or': [{'last_manual_sync_at': None}, {'last_manual_sync_at': {'$lte': t - interval}}]},
@@ -191,7 +216,11 @@ async def delete_gmail(user: CurrentUser):
     conn = await GmailConnection.find_one(GmailConnection.user_id == user.id, ignore_cache=True)
     if conn is None:
         raise HTTPException(404, 'Gmail is not connected.')
-    await disconnect(conn)
+    try:
+        await disconnect(conn)  # also resumes an interrupted disconnect (status 'disconnecting')
+    except Exception as error:
+        _log.error('Gmail disconnect did not finish (%s).', type(error).__name__)
+        raise HTTPException(503, 'Gmail could not be fully disconnected. Try again.') from None
 
 
 # --- Needs Review --------------------------------------------------------------------------------------------
@@ -203,13 +232,15 @@ async def read_reviews(user: CurrentUser):
 
 class ReviewDecision(BaseModel):
     """Optional edits. New application: company, jobTitle, status, dateApplied. Ambiguous match: applicationId
-    (an existing application to link) or nothing to create a new one. Status suggestion: status."""
+    (an existing application to link) or nothing to create a new one. Status suggestion: status. Schedule
+    suggestion: scheduledAt (ISO 8601 with offset)."""
 
     company: str | None = Field(default=None, max_length=200)
     jobTitle: str | None = Field(default=None, max_length=200)  # noqa: N815
     status: str | None = Field(default=None, max_length=20)
     dateApplied: str | None = Field(default=None, max_length=10)  # noqa: N815
     applicationId: str | None = Field(default=None, max_length=24)  # noqa: N815
+    scheduledAt: str | None = Field(default=None, max_length=40)  # noqa: N815  (schedule suggestion: user's time)
 
 
 @router.post('/gmail/reviews/{review_id}/approve')

@@ -49,6 +49,8 @@ class FakeGoogle:
         self.exchanged: list[tuple[str, str]] = []
         self.nonces: list[str] = []
         self.revoked: list[str] = []
+        self.revoke_result = True
+        self.revoke_error: Exception | None = None
         self.refreshed: list[str] = []
         self.refresh_error: Exception | None = None
         self.id_error = False
@@ -82,8 +84,11 @@ class FakeGoogle:
             raise self.refresh_error
         return TokenResponse(access_token='access-fresh', refresh_token=None, scopes=list(self.scopes), id_token=None)
 
-    async def revoke(self, token: str) -> None:
+    async def revoke(self, token: str) -> bool:
         self.revoked.append(token)
+        if self.revoke_error:
+            raise self.revoke_error
+        return self.revoke_result
 
     def _window(self, query: str) -> tuple[int, int]:
         after = before = None

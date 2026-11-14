@@ -143,15 +143,21 @@ class _Jwks:
         return type('K', (), {'key': self.public})()
 
 
-@pytest.mark.parametrize('change', ['ok', 'issuer', 'audience', 'expired', 'nonce', 'signature'])
+@pytest.mark.parametrize('change', ['ok', 'issuer', 'audience', 'expired', 'nonce', 'signature',
+                                    'email_unverified', 'email_verified_missing'])
 def test_real_id_token_verification(fake_google, change):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = datetime.now(UTC)
     claims = {'iss': 'https://accounts.google.com', 'aud': settings.google_oauth_client_id, 'sub': '123',
-              'email': 'Student@Gmail.example', 'iat': now, 'exp': now + timedelta(minutes=5), 'nonce': 'n1'}
+              'email': 'Student@Gmail.example', 'email_verified': True, 'iat': now,
+              'exp': now + timedelta(minutes=5), 'nonce': 'n1'}
     signer = key
-    if change == 'issuer':
+    if change == 'email_unverified':
+        claims['email_verified'] = False
+    elif change == 'email_verified_missing':
+        del claims['email_verified']
+    elif change == 'issuer':
         claims['iss'] = 'https://evil.example'
     elif change == 'audience':
         claims['aud'] = 'someone-else'

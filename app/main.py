@@ -18,6 +18,8 @@ from app.users.router import router as users_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.gmail.oauth import install_log_redaction
+    install_log_redaction()  # OAuth codes/state never appear in uvicorn access logs
     await init_db()
     from app.config import settings
     from app.gmail.scheduler import scheduler

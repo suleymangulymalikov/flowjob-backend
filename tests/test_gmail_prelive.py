@@ -375,7 +375,8 @@ def test_id_token_clock_skew_tolerance(fake_google, iat_offset, exp_offset, ok):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = datetime.now(UTC)
     claims = {'iss': 'https://accounts.google.com', 'aud': settings.google_oauth_client_id, 'sub': '1',
-              'email': 'a@gmail.example', 'nonce': 'n', 'iat': now + timedelta(seconds=iat_offset),
+              'email': 'a@gmail.example', 'email_verified': True, 'nonce': 'n',
+              'iat': now + timedelta(seconds=iat_offset),
               'exp': now + timedelta(seconds=exp_offset)}
     api = GoogleApi()
     api._jwks = _Jwks(key.public_key())

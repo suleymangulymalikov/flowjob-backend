@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
@@ -30,6 +31,30 @@ from app.users.models import User
 STATE_TTL = timedelta(minutes=10)
 COOKIE = 'flowjob_gmail_oauth'
 COOKIE_PATH = '/api/v1/gmail/oauth'
+
+
+CALLBACK_PATH = '/api/v1/gmail/oauth/callback'
+
+
+class RedactOAuthCallback(logging.Filter):
+    """Access-log filter: the OAuth callback's query string (authorization code, state) never reaches a log.
+
+    Uvicorn's access records carry the request target as the third argument; only that path is rewritten.
+    Reverse proxies in front of the backend must be configured likewise (see README, "Production").
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str) \
+                and args[2].startswith(CALLBACK_PATH + '?'):
+            record.args = (*args[:2], CALLBACK_PATH + '?[redacted]', *args[3:])
+        return True
+
+
+def install_log_redaction() -> None:
+    access = logging.getLogger('uvicorn.access')
+    if not any(isinstance(f, RedactOAuthCallback) for f in access.filters):
+        access.addFilter(RedactOAuthCallback())
 
 
 class OAuthFailure(Exception):

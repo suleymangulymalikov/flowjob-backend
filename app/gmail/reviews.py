@@ -158,7 +158,7 @@ async def _approve(review: GmailReview, edits: dict[str, Any]) -> dict[str, Any]
     if review.kind == 'status_change':
         return await _approve_status(review, edits)
     if review.kind == 'schedule_change':
-        return await _approve_schedule(review)
+        return await _approve_schedule(review, edits)
     if review.kind == 'ambiguous_link' and edits.get('applicationId'):
         return await _approve_link(review, conn, edits['applicationId'])
     if review.kind in ('new_application', 'ambiguous_link'):
@@ -252,15 +252,35 @@ async def _ensure_status_event(review: GmailReview, status_from: str | None, sta
                                status_to=status_to, item_key=marker).insert()
 
 
-async def _approve_schedule(review: GmailReview) -> dict[str, Any]:
+def user_datetime(value: Any) -> datetime:
+    """A date-time the user entered: ISO 8601 with an explicit offset (the browser sends its own)."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError:
+        raise HTTPException(422, 'Enter a valid date and time.') from None
+    if parsed.tzinfo is None:
+        raise HTTPException(422, 'Include a time zone offset.')
+    if not 2000 <= parsed.year <= 2100:
+        raise HTTPException(422, 'Enter a valid date and time.')
+    return parsed
+
+
+async def _approve_schedule(review: GmailReview, edits: dict[str, Any]) -> dict[str, Any]:
     p = review.proposal
-    if not p.get('scheduledAt') or review.source_event_id is None:
+    if review.source_event_id is None:
         raise HTTPException(409, 'This suggestion cannot be approved.')
+    if edits.get('scheduledAt'):
+        # The user set the time (required when the email's time could not be converted safely).
+        chosen = user_datetime(edits['scheduledAt'])
+        change = {'scheduled_at': chosen, 'scheduled_tz': None, 'corrected': True}
+    elif p.get('scheduledAt'):
+        change = {'scheduled_at': datetime.fromisoformat(p['scheduledAt']), 'scheduled_tz': p.get('scheduledTz')}
+    else:
+        raise HTTPException(422, 'Enter the date and time from the email.')
+    change['previous_scheduled_at'] = datetime.fromisoformat(p['previousScheduledAt']) \
+        if p.get('previousScheduledAt') else None
     result = await ApplicationEvent.get_pymongo_collection().update_one(
-        {'_id': review.source_event_id, 'user_id': review.user_id, 'state': 'active'},
-        {'$set': {'scheduled_at': datetime.fromisoformat(p['scheduledAt']), 'scheduled_tz': p.get('scheduledTz'),
-                  'previous_scheduled_at': datetime.fromisoformat(p['previousScheduledAt'])
-                  if p.get('previousScheduledAt') else None}})
+        {'_id': review.source_event_id, 'user_id': review.user_id, 'state': 'active'}, {'$set': change})
     if result.matched_count != 1:
         await _finish(review, 'invalidated')
         raise HTTPException(409, 'This suggestion is out of date.')
@@ -311,16 +331,8 @@ async def correct_event(app_id: str, event_id: str, user_id, data: dict[str, Any
         changes['event_type'] = data['eventType']
     if 'scheduledAt' in data:
         value = data['scheduledAt']
-        if value is None:
-            changes['scheduled_at'] = None
-        else:
-            try:
-                parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-            except ValueError:
-                raise HTTPException(422, 'Enter a valid date and time.') from None
-            if parsed.tzinfo is None:
-                raise HTTPException(422, 'Include a time zone offset.')
-            changes['scheduled_at'] = parsed
+        changes['scheduled_at'] = None if value is None else user_datetime(value)
+        changes['scheduled_tz'] = None  # the email's zone label no longer describes the user's own time
     await ApplicationEvent.get_pymongo_collection().update_one({'_id': event.id, 'user_id': user_id},
                                                                {'$set': changes})
     await reconcile.invalidate_for_event(user_id, event.id)

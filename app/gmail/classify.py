@@ -10,7 +10,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -250,28 +250,82 @@ def norm_ref(ref: str) -> str:
     return re.sub(r'[^0-9a-z]', '', fold(ref))
 
 
-def parse_when(value: str | None, *, fallback_tz: str, stated_tz: str | None) -> tuple[datetime | None, str | None]:
-    """Parse a model-reported date-time. Naive values get the stated zone, else the user's zone. Invalid → None."""
-    if not value:
+# "UTC+2", "GMT+1", "UTC−05:00", "+05:30", "UTC" ... (any dash/minus sign). Abbreviations such as PST or CEST are
+# not offsets and are only accepted when they are real IANA names (e.g. "CET", "EST").
+_OFFSET = re.compile(r'^(?:utc|gmt)?\s*(?:([+\-−–])\s*(\d{1,2})(?::?(\d{2}))?)?$', re.I)
+
+
+def _offset_zone(label: str) -> timezone | None:
+    m = _OFFSET.match(label.strip())
+    if not m or (not m.group(1) and not re.match(r'^(utc|gmt)$', label.strip(), re.I)):
+        return None
+    if not m.group(1):
+        return timezone.utc
+    hours, minutes = int(m.group(2)), int(m.group(3) or 0)
+    if hours > 14 or minutes >= 60:
+        return None
+    sign = -1 if m.group(1) in '-−–' else 1
+    return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
+def _offset_label(offset: timedelta | None) -> str:
+    total = int((offset or timedelta()).total_seconds() // 60)
+    sign = '-' if total < 0 else '+'
+    return f'UTC{sign}{abs(total) // 60:02d}:{abs(total) % 60:02d}'
+
+
+def resolve_zone(label: str | None) -> tuple[tzinfo | None, str | None]:
+    """(zone, normalized label) for an IANA name or an explicit fixed offset; (None, None) when unsupported."""
+    if not label or not label.strip():
         return None, None
+    fixed = _offset_zone(label)
+    if fixed is not None:
+        return fixed, _offset_label(fixed.utcoffset(None))
+    try:
+        return ZoneInfo(label.strip()), label.strip()[:64]
+    except (ZoneInfoNotFoundError, ValueError):
+        return None, None
+
+
+def parse_when(value: str | None, *, fallback_tz: str, stated_tz: str | None
+               ) -> tuple[datetime | None, str | None, str | None]:
+    """Parse a model-reported date-time into (UTC instant, zone label, problem).
+
+    * An offset inside the value is authoritative; a stated zone must agree with it at that instant.
+    * A naive value uses the stated zone (IANA name or fixed offset such as UTC+2), else the user's zone.
+    * The label always names the zone actually used, never one that was not applied.
+    * Problems (``unsupported_timezone``, ``conflicting_timezone``, ``nonexistent_time``, ``ambiguous_time``)
+      return no instant, so scheduling goes to review instead of a confidently wrong time.
+    """
+    if not value:
+        return None, None, None
     try:
         parsed = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
     except ValueError:
-        return None, None
-    zone = None
-    for candidate in (stated_tz, fallback_tz):
-        if candidate:
-            try:
-                zone = ZoneInfo(candidate)
-                break
-            except (ZoneInfoNotFoundError, ValueError):
-                continue
-    label = stated_tz if stated_tz else fallback_tz
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=zone or UTC)
+        return None, None, None
     if not 2000 <= parsed.year <= 2100:
-        return None, None
-    return parsed.astimezone(UTC), (label or 'UTC')[:64]
+        return None, None, None
+    stated, stated_label = resolve_zone(stated_tz)
+    if stated_tz and stated_tz.strip() and stated is None:
+        if parsed.tzinfo is None:
+            return None, None, 'unsupported_timezone'
+        stated_label = None  # the value's own offset still identifies the instant
+    if parsed.tzinfo is not None:
+        if stated is not None and parsed.astimezone(stated).utcoffset() != parsed.utcoffset():
+            return None, None, 'conflicting_timezone'
+        label = stated_label if stated is not None else _offset_label(parsed.utcoffset())
+        return parsed.astimezone(UTC), label, None
+    zone, label = (stated, stated_label) if stated is not None else resolve_zone(fallback_tz)
+    if zone is None:
+        zone, label = UTC, 'UTC'
+    local = parsed.replace(tzinfo=zone)
+    if isinstance(zone, ZoneInfo):
+        # DST edges: a wall time skipped by spring-forward does not exist; one repeated by fall-back is ambiguous.
+        if local.astimezone(UTC).astimezone(zone).replace(tzinfo=None) != parsed:
+            return None, None, 'nonexistent_time'
+        if parsed.replace(tzinfo=zone, fold=1).utcoffset() != local.utcoffset():
+            return None, None, 'ambiguous_time'
+    return local.astimezone(UTC), label, None
 
 
 def item_key(employer: str | None, title: str | None, event_type: str, refs: list[str]) -> str:
@@ -331,8 +385,8 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
             cid, _ = resolve_key(k, keys)  # unknown candidate keys are ignored (they never link anything)
             if cid and cid != match_id and cid not in candidates:
                 candidates.append(cid)
-        when, when_tz = parse_when(raw.scheduled_at, fallback_tz=tz, stated_tz=raw.timezone)
-        before, _ = parse_when(raw.previous_scheduled_at, fallback_tz=tz, stated_tz=raw.timezone)
+        when, when_tz, schedule_issue = parse_when(raw.scheduled_at, fallback_tz=tz, stated_tz=raw.timezone)
+        before, _, _ = parse_when(raw.previous_scheduled_at, fallback_tz=tz, stated_tz=raw.timezone)
         employer = (raw.employer or '').strip() or None
         title = (raw.job_title or '').strip() or None
         key = item_key(employer, title, raw.event_type, refs)
@@ -358,5 +412,10 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
             'scheduled_at': when.isoformat() if when else None, 'scheduled_tz': when_tz,
             'previous_scheduled_at': before.isoformat() if before else None,
             'schedule_change': raw.schedule_change,
+            # A stated date-time that could not be converted safely: the user sets it in Needs Review. The stated
+            # text (short, as the email gives it) is only shown there; it is erased with all Gmail data.
+            'schedule_issue': schedule_issue,
+            'stated_time': ' '.join(p for p in (raw.scheduled_at, raw.timezone) if p)[:100] if schedule_issue
+            else None,
         })
     return {'items': items, 'is_recruitment': analysis.is_recruitment}

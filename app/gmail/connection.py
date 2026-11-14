@@ -137,17 +137,54 @@ async def purge_if_disconnected(user_id: PydanticObjectId, connection_id: Pydant
     return True
 
 
+# A disconnect older than this that still exists was interrupted (crash, restart, database error): the scheduler
+# finishes it. Every step below is idempotent, so a retry racing a slow original is harmless.
+ABANDONED_DISCONNECT_AFTER = timedelta(minutes=5)
+
+
 async def disconnect(conn: GmailConnection) -> None:
+    """Fence, revoke, erase. Safe to call again for a connection already in ``disconnecting`` (user retry or the
+    scheduler's recovery of an interrupted disconnect)."""
     # 1. Fence: no renewal can succeed once the status leaves 'active', so in-flight work stops writing.
     await GmailConnection.get_pymongo_collection().update_one(
         {'_id': conn.id}, {'$set': {'status': 'disconnecting', 'lock_owner': 'disconnect', 'updated_at': now()}})
-    # 2. Revoke this user's own grant (best effort).
+    await finish_disconnect(conn)
+
+
+async def finish_disconnect(conn: GmailConnection) -> None:
+    pending = await GmailConnection.get_pymongo_collection().find_one(
+        {'_id': conn.id, 'status': 'disconnecting'}, {'_id': 1})
+    if pending is None:
+        # Already finished (or never started) for this connection: only the idempotent, connection-scoped erasure
+        # runs. No revocation, so a stale retry can never touch a newer grant.
+        await purge(conn.user_id, conn.id)
+        return
+    # 2. Revoke this user's own grant (best effort; never logs the token or Google's response body).
     try:
         refresh = crypto.decrypt(conn.enc_refresh_token, crypto.connection_aad(conn.user_id, conn.google_sub))
-        await api().revoke(refresh)
-    except (crypto.TokenCryptoError, GoogleError):
-        _log.warning('Could not revoke a Gmail grant during disconnect.')
-    # 3. Erase connection data, then the connection (and its encrypted credential) itself.
+        if await api().revoke(refresh) is False:
+            _log.warning('Google did not confirm revocation of a Gmail grant during disconnect.')
+    except crypto.TokenCryptoError:
+        _log.warning('Could not revoke a Gmail grant during disconnect (credential not decryptable).')
+    except GoogleError as error:
+        _log.warning('Could not revoke a Gmail grant during disconnect (%s).', error.code)
+    # 3. Erase connection data, then the connection (and its encrypted credential) itself. The connection goes
+    # last, so an interruption anywhere before leaves it in 'disconnecting' for a retry.
     await purge(conn.user_id, conn.id)
     await GmailOAuthState.get_pymongo_collection().delete_many({'user_id': conn.user_id})
-    await GmailConnection.get_pymongo_collection().delete_one({'_id': conn.id})
+    await GmailConnection.get_pymongo_collection().delete_one({'_id': conn.id, 'status': 'disconnecting'})
+
+
+async def finish_abandoned_disconnects(limit: int = 20) -> int:
+    """Complete disconnects that were interrupted. Returns how many were finished."""
+    cutoff = now() - ABANDONED_DISCONNECT_AFTER
+    docs = await GmailConnection.get_pymongo_collection().find(
+        {'status': 'disconnecting', 'updated_at': {'$lte': cutoff}}).limit(limit).to_list()
+    done = 0
+    for doc in docs:
+        try:
+            await finish_disconnect(GmailConnection.model_validate(doc))
+            done += 1
+        except Exception as error:  # type only: retried on the next tick
+            _log.error('Could not finish an interrupted Gmail disconnect (%s).', type(error).__name__)
+    return done
