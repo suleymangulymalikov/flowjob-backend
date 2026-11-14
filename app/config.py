@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +42,37 @@ class Settings(BaseSettings):
     tailor_timeout_seconds: float = 60.0
     tailor_temperature: float | None = 0.2
     ai_global_daily_quota: int = 500
+
+    # --- Gmail integration (optional). Without the Google client and token key, Gmail reports itself unavailable
+    # and every other feature works unchanged. ---
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
+    # Must match the Google Cloud OAuth client exactly. The default goes through the Vite dev proxy so the
+    # browser-binding cookie stays same-origin with the frontend.
+    google_oauth_redirect_uri: str = "http://localhost:5173/api/v1/gmail/oauth/callback"
+    # Base64 (urlsafe or standard) 32-byte AES-256-GCM key for stored refresh tokens. Separate from jwt_secret.
+    gmail_token_key: str | None = None
+    # Comma-separated previous keys, accepted for decryption only (rotation).
+    gmail_token_keys_old: str = ""
+    frontend_base_url: str = "http://localhost:5173"
+    gmail_scheduler_enabled: bool = False  # off by default: tests and imports never start background work
+    gmail_sync_interval_hours: float = 3.0
+    gmail_scheduler_tick_seconds: float = 600.0
+    gmail_backfill_days: int = Field(default=30, ge=1, le=30)
+    gmail_overlap_days: int = Field(default=2, ge=0, le=7)
+    gmail_batch_size: int = Field(default=50, ge=1, le=50)
+    gmail_max_batches_per_run: int = Field(default=4, ge=1, le=4)
+    gmail_max_list_pages_per_run: int = Field(default=10, ge=1, le=50)
+    gmail_manual_sync_min_interval_seconds: int = 60
+    gmail_lock_ttl_seconds: int = 600
+    gmail_daily_quota: int = 200  # AI classifications per user per UTC day
+    gmail_global_daily_quota: int = 2000  # separate from ai_global_daily_quota (Match/Tailor)
+    gmail_max_output_tokens: int = 2000
+    gmail_timeout_seconds: float = 60.0
+
+    @property
+    def gmail_configured(self) -> bool:
+        return bool(self.google_oauth_client_id and self.google_oauth_client_secret and self.gmail_token_key)
 
 
 settings = Settings()
