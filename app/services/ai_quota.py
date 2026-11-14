@@ -16,7 +16,7 @@ from pymongo.errors import AutoReconnect, DuplicateKeyError, PyMongoError
 from app.config import settings
 from app.matches.models import MatchUsage
 
-Workflow = Literal['match', 'tailor']
+Workflow = Literal['match', 'tailor', 'gmail']
 _GLOBAL = PydanticObjectId('000000000000000000000000')
 _log = logging.getLogger(__name__)
 
@@ -70,6 +70,11 @@ class Reservation:
         return f'users.{self.workflow}.{self.user_id}'
 
     @property
+    def global_field(self) -> str:
+        # Gmail classifications have their own global cap so they cannot exhaust Match/Tailor capacity.
+        return 'gmail_used' if self.workflow == 'gmail' else 'used'
+
+    @property
     def marker(self) -> str:
         return f'pending.{self.token}'
 
@@ -79,8 +84,8 @@ class Reservation:
         query = {**_day_key(self.day), self.marker: self.counter}
         update: dict = {'$unset': {self.marker: ''}}
         if refund:
-            query.update({'used': {'$gt': 0}, self.counter: {'$gt': 0}})
-            update['$inc'] = {'used': -1, self.counter: -1}
+            query.update({self.global_field: {'$gt': 0}, self.counter: {'$gt': 0}})
+            update['$inc'] = {self.global_field: -1, self.counter: -1}
         collection = MatchUsage.get_pymongo_collection()
         try:
             await collection.update_one(query, update)
@@ -102,12 +107,15 @@ async def reserve_quota(user_id: PydanticObjectId, workflow: Workflow) -> Reserv
     await _ensure_day(day)
     reservation = Reservation(day, user_id, workflow, ObjectId())
     counter = reservation.counter
-    user_limit = settings.match_daily_quota if workflow == 'match' else settings.tailor_daily_quota
-    global_limit = settings.ai_global_daily_quota
+    gf = reservation.global_field
+    user_limit = {'match': settings.match_daily_quota, 'tailor': settings.tailor_daily_quota,
+                  'gmail': settings.gmail_daily_quota}[workflow]
+    global_limit = settings.gmail_global_daily_quota if workflow == 'gmail' else settings.ai_global_daily_quota
     user_used = {'$ifNull': [f'${counter}', 0]}
+    global_used = {'$ifNull': [f'${gf}', 0]}
     allowed = {'$and': [
         {'$lt': [user_used, user_limit]},
-        {'$lt': ['$used', global_limit]},
+        {'$lt': [global_used, global_limit]},
     ]}
 
     # Evaluate both limits and increment both counters together. The returned
@@ -116,11 +124,11 @@ async def reserve_quota(user_id: PydanticObjectId, workflow: Workflow) -> Reserv
         before = await MatchUsage.get_pymongo_collection().find_one_and_update(
             _day_key(day),
             [{'$set': {
-                'used': {'$cond': [allowed, {'$add': ['$used', 1]}, '$used']},
+                gf: {'$cond': [allowed, {'$add': [global_used, 1]}, global_used]},
                 counter: {'$cond': [allowed, {'$add': [user_used, 1]}, f'${counter}']},
                 reservation.marker: {'$cond': [allowed, counter, '$$REMOVE']},
             }}],
-            projection={'used': 1, counter: 1},
+            projection={gf: 1, counter: 1},
             return_document=ReturnDocument.BEFORE,
         )
     except (PyMongoError, asyncio.CancelledError):
@@ -131,9 +139,9 @@ async def reserve_quota(user_id: PydanticObjectId, workflow: Workflow) -> Reserv
     if before is None:
         raise HTTPException(503, 'AI quota is temporarily unavailable. Please try again.')
     if before.get('users', {}).get(workflow, {}).get(str(user_id), 0) >= user_limit:
-        action = 'AI match' if workflow == 'match' else 'CV tailoring'
+        action = {'match': 'AI match', 'tailor': 'CV tailoring', 'gmail': 'email analysis'}[workflow]
         raise HTTPException(429, f'Daily {action} limit reached. Please try again tomorrow.')
-    if before['used'] >= global_limit:
+    if before.get(gf, 0) >= global_limit:
         raise HTTPException(503, 'The AI service is at capacity today. Please try again tomorrow.')
     return reservation
 

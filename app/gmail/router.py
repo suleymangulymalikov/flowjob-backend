@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field
 
 from app.auth.dependencies import get_current_user
 from app.config import settings
-from app.gmail import oauth, sync
+from app.applications.router import owned, present_full
+from app.gmail import oauth, reviews, sync
 from app.gmail.connection import as_utc, connection_for, disconnect, now
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview
 from app.integration.router import secure_cookie
@@ -183,3 +184,51 @@ async def delete_gmail(user: CurrentUser):
     if conn is None:
         raise HTTPException(404, 'Gmail is not connected.')
     await disconnect(conn)
+
+
+# --- Needs Review --------------------------------------------------------------------------------------------
+
+@router.get('/gmail/reviews')
+async def read_reviews(user: CurrentUser):
+    return await reviews.list_reviews(user.id)
+
+
+class ReviewDecision(BaseModel):
+    """Optional edits. New application: company, jobTitle, status, dateApplied. Ambiguous match: applicationId
+    (an existing application to link) or nothing to create a new one. Status suggestion: status."""
+
+    company: str | None = Field(default=None, max_length=200)
+    jobTitle: str | None = Field(default=None, max_length=200)  # noqa: N815
+    status: str | None = Field(default=None, max_length=20)
+    dateApplied: str | None = Field(default=None, max_length=10)  # noqa: N815
+    applicationId: str | None = Field(default=None, max_length=24)  # noqa: N815
+
+
+@router.post('/gmail/reviews/{review_id}/approve')
+async def approve_review(review_id: str, user: CurrentUser, data: ReviewDecision | None = None):
+    edits = data.model_dump(exclude_none=True) if data else {}
+    return await reviews.approve(review_id, user.id, edits)
+
+
+@router.post('/gmail/reviews/{review_id}/dismiss')
+async def dismiss_review(review_id: str, user: CurrentUser):
+    return await reviews.dismiss(review_id, user.id)
+
+
+# --- Recruitment activity ------------------------------------------------------------------------------------
+
+class ActivityCorrection(BaseModel):
+    eventType: str | None = Field(default=None, max_length=40)  # noqa: N815
+    scheduledAt: str | None = Field(default=None, max_length=40)  # noqa: N815
+
+
+@router.patch('/applications/{app_id}/activity/{event_id}')
+async def correct_activity(app_id: str, event_id: str, data: ActivityCorrection, user: CurrentUser):
+    await reviews.correct_event(app_id, event_id, user.id, data.model_dump(exclude_unset=True))
+    return await present_full(await owned(app_id, user), user)
+
+
+@router.post('/applications/{app_id}/activity/{event_id}/dismiss')
+async def dismiss_activity(app_id: str, event_id: str, user: CurrentUser):
+    await reviews.dismiss_event(app_id, event_id, user.id)
+    return await present_full(await owned(app_id, user), user)
