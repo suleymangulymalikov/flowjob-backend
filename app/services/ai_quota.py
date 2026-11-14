@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from beanie import PydanticObjectId
@@ -21,8 +21,19 @@ _GLOBAL = PydanticObjectId('000000000000000000000000')
 _log = logging.getLogger(__name__)
 
 
+class QuotaExhausted(HTTPException):
+    """A per-user or global daily limit was reached (same status and message as before for the HTTP routes).
+    Lets background work tell "wait until the next UTC day" apart from a briefly unavailable quota store."""
+
+
 def _utc_day() -> str:
     return datetime.now(UTC).date().isoformat()
+
+
+def next_quota_day() -> datetime:
+    """When daily limits reset: the next UTC midnight (quota days are UTC dates)."""
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return today + timedelta(days=1)
 
 
 def _day_key(day: str) -> dict:
@@ -140,9 +151,9 @@ async def reserve_quota(user_id: PydanticObjectId, workflow: Workflow) -> Reserv
         raise HTTPException(503, 'AI quota is temporarily unavailable. Please try again.')
     if before.get('users', {}).get(workflow, {}).get(str(user_id), 0) >= user_limit:
         action = {'match': 'AI match', 'tailor': 'CV tailoring', 'gmail': 'email analysis'}[workflow]
-        raise HTTPException(429, f'Daily {action} limit reached. Please try again tomorrow.')
+        raise QuotaExhausted(429, f'Daily {action} limit reached. Please try again tomorrow.')
     if before.get(gf, 0) >= global_limit:
-        raise HTTPException(503, 'The AI service is at capacity today. Please try again tomorrow.')
+        raise QuotaExhausted(503, 'The AI service is at capacity today. Please try again tomorrow.')
     return reservation
 
 

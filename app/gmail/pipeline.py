@@ -17,7 +17,7 @@ from app.gmail.preprocess import minimize
 from app.gmail.sync import MessageFailed, StopRun, SyncContext, google_stop
 from app.services import ai_gmail
 from app.services.ai_provider import AiError, AiNotConfigured, AiRateLimited
-from app.services.ai_quota import generation_quota
+from app.services.ai_quota import QuotaExhausted, generation_quota, next_quota_day
 from app.users.models import User
 
 
@@ -48,9 +48,13 @@ async def analyze_message(ctx: SyncContext, msg: GmailMessage) -> dict | None:
         async with generation_quota(conn.user_id, 'gmail'):
             await ctx.fence()
             out = await run_in_threadpool(ai_gmail.analyze, prompt)
+    except QuotaExhausted:
+        # Per-user or global daily cap reached: stop, keep work queued, and make no automatic attempt before the
+        # quota day resets (the scheduler resumes at the next UTC midnight).
+        raise StopRun('quota_reached', attention=False, resume_at=next_quota_day()) from None
     except HTTPException:
-        # Per-user or global Gmail cap reached (or the quota store is briefly unavailable): stop, keep work queued.
-        raise StopRun('quota_reached', attention=False) from None
+        # The quota store is briefly unavailable: stop and keep work queued for the normal cadence.
+        raise StopRun('ai_unavailable', attention=False) from None
     except (AiNotConfigured, AiRateLimited):
         raise StopRun('ai_unavailable', attention=True) from None
     except AiError:

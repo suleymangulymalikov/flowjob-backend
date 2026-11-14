@@ -25,7 +25,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import asdict, dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -54,12 +54,15 @@ class StopRun(Exception):
     """Stop the whole run. ``attention`` marks a connection-wide problem that needs a manual sync; ``transient``
     marks a temporary Google failure that the scheduler retries later with backoff (no user action needed)."""
 
-    def __init__(self, code: str, *, attention: bool, transient: bool = False, retry_after: float | None = None):
+    def __init__(self, code: str, *, attention: bool, transient: bool = False, retry_after: float | None = None,
+                 resume_at: datetime | None = None):
         super().__init__(code)
         self.code = code
         self.attention = attention
         self.transient = transient
         self.retry_after = retry_after
+        # Earliest time an automatic run may try again (e.g. the daily AI quota reset); None = normal cadence.
+        self.resume_at = resume_at
 
 
 def google_stop(error: GoogleError) -> StopRun:
@@ -75,6 +78,7 @@ def google_stop(error: GoogleError) -> StopRun:
 # Sync now (bounded retries: at most MAX_TRANSIENT_FAILURES automatic attempts per incident).
 BACKOFF_BASE = timedelta(minutes=15)
 MAX_TRANSIENT_FAILURES = 5
+NO_RETRY: dict[str, Any] = {'retry_at': None, 'transient_failures': 0}  # no pending backoff incident
 
 
 def backoff(failures: int, retry_after: float | None) -> timedelta:
@@ -198,7 +202,7 @@ async def run_locked(conn_id: PydanticObjectId, owner: str, *, trigger: str, ret
         # Type only: exception messages may echo email-derived values.
         _log.error('Gmail sync stopped unexpectedly (%s).', type(error).__name__)
         summary.stoppedReason = 'sync_error'
-        await _finish(conn_id, owner, summary, attention='sync_error')
+        await _finish(conn_id, owner, summary, attention='sync_error', extra=NO_RETRY)
     finally:
         await release_lock(conn_id, owner)
     return summary
@@ -246,12 +250,10 @@ async def _run(conn_id: PydanticObjectId, owner: str, summary: RunSummary, retry
         token = await access_token(conn)
     except TokenCryptoError:
         # Missing/rotated encryption key: a configuration problem only the operator can fix. Do not repeat it.
-        summary.stoppedReason = 'config_error'
-        await _finish(conn_id, owner, summary, attention='config_error')
+        await _stopped(conn, owner, summary, StopRun('config_error', attention=True))
         return
     except InvalidGrant:
-        summary.stoppedReason = 'reauth_required'
-        await _finish(conn_id, owner, summary)
+        await _stopped(conn, owner, summary, StopRun('reauth_required', attention=False))
         return
     except GoogleError as error:
         await _stopped(conn, owner, summary, google_stop(error))
@@ -280,7 +282,11 @@ async def _stopped(conn: GmailConnection, owner: str, summary: RunSummary, stop:
     consecutive ones the connection needs a manual Sync now (no endless automatic retries)."""
     summary.stoppedReason = stop.code
     if not stop.transient:
-        await _finish(conn.id, owner, summary, attention=stop.code if stop.attention else None)
+        # Not a temporary Google failure: any earlier backoff incident is over. Leaving a past retry_at behind
+        # would make the scheduler start a run on every tick. Only an explicit resume time (the daily AI quota
+        # reset) delays the next automatic run; otherwise the normal cadence applies.
+        await _finish(conn.id, owner, summary, attention=stop.code if stop.attention else None,
+                      extra=NO_RETRY | {'retry_at': stop.resume_at})
         return
     failures = (conn.transient_failures or 0) + 1
     if failures > MAX_TRANSIENT_FAILURES:

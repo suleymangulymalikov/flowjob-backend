@@ -206,7 +206,8 @@ a `VITE_*` variable, which is public).
 * A connection is synced every `GMAIL_SYNC_INTERVAL_HOURS` (3). A run lists at most 10 pages of 100 messages
   (metadata only) and analyses at most 4 × 50 candidates; the rest continues on the next run. AI analyses are capped
   per user (`GMAIL_DAILY_QUOTA`, 200/day) and globally (`GMAIL_GLOBAL_DAILY_QUOTA`, 2000/day), separately from Match and
-  Tailoring; one analysis per email, never repeated on retry.
+  Tailoring; one analysis per email, never repeated on retry. When a daily cap is reached the run stops, the
+  remaining emails stay queued, and no automatic run starts before the next UTC midnight, when the caps reset.
 * **Temporary Google failures** (network errors and timeouts, Google 5xx, HTTP 429, and 403 responses whose reason is
   a rate or quota limit, on the Gmail API or the token endpoint) never ask the user to reconnect. The scheduler
   retries after 15 min, 30 min, 1 h, 2 h and 4 h, never earlier than Google's `Retry-After` (capped at 24 h); a manual
@@ -275,9 +276,12 @@ id).
 **Reconnecting** re-reads the last 30 days as a new connection. Because dismissals and suppressions were erased,
 suggestions the user dismissed may reappear and a deleted Gmail-imported application may be suggested again; the UI
 says so in the Disconnect and Connect dialogs. Approved statuses are safe: an email older than the application's
-latest status decision never proposes a status change, and a historical confirmation from before that decision is
-not treated as a possible reapplication. While a connection stays connected, deleted applications are never
-recreated from the same evidence.
+latest status decision (manual or approved) never proposes a status change, and for a closed application a
+confirmation received before its latest **approved** Gmail status decision is linked as history rather than treated
+as a possible reapplication. A manual status edit only records when the user clicked, so it is not used for that
+decision: such confirmations, and any confirmation with a different application reference, go to Needs Review
+instead of creating a duplicate. While a connection stays connected, deleted applications are never recreated from
+the same evidence.
 
 Account deletion is not implemented in this backend; when it is added, it must run the Gmail disconnect first.
 

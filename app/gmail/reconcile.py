@@ -89,6 +89,9 @@ class UserState:
     thread_apps: dict[str, set[str]]
     refs: dict[str, set[str]]  # application id -> normalized references
     suppressions: list[GmailSuppression]
+    # application id -> email time of the latest approved Gmail status decision. Kept after disconnect (approved
+    # history entries carry no Gmail ids), so it also anchors history re-read after a reconnect.
+    approved_at: dict[str, datetime] = field(default_factory=dict)
 
 
 async def load_state(conn: GmailConnection) -> UserState:
@@ -105,8 +108,16 @@ async def load_state(conn: GmailConnection) -> UserState:
             thread_apps.setdefault(e['thread_id'], set()).add(str(e['application_id']))
         for r in e.get('references') or []:
             refs.setdefault(str(e['application_id']), set()).add(norm_ref(r))
+    approved_at: dict[str, datetime] = {}
+    async for e in ApplicationEvent.get_pymongo_collection().find(
+            {'user_id': conn.user_id, 'source': 'gmail_approved', 'event_type': 'status_change'},
+            {'application_id': 1, 'occurred_at': 1}):
+        at, key = as_utc(e.get('occurred_at')), str(e['application_id'])
+        if at and (key not in approved_at or at > approved_at[key]):
+            approved_at[key] = at
     suppressions = await GmailSuppression.find(GmailSuppression.connection_id == conn.id).to_list()
-    return UserState(apps=apps, thread_apps=thread_apps, refs=refs, suppressions=suppressions)
+    return UserState(apps=apps, thread_apps=thread_apps, refs=refs, suppressions=suppressions,
+                     approved_at=approved_at)
 
 
 def shortlist(state: UserState, thread_id: str | None, text: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -260,18 +271,21 @@ def auto_import_ok(item: dict[str, Any]) -> tuple[bool, str]:
 
 def possible_reapplication(item: dict[str, Any], app: Application, via: str, state: UserState,
                            msg: GmailMessage) -> bool:
+    """Whether a confirmation matched to an existing application may be a NEW application (→ Needs Review)."""
     if item['kind'] != 'submitted_application' or via in ('thread', 'reference'):
         return False
-    # An email from before the user's latest status decision on this application (a manual change or an approved
-    # suggestion) is part of its known history, typically re-read after a reconnect: never a new application.
-    basis = as_utc(app.status_basis_at)
-    if basis and as_utc(msg.internal_at) <= basis:
-        return False
-    if status_value(app) in TERMINAL:
-        return True
     known = state.refs.get(str(app.id), set())
     mine = {norm_ref(r) for r in item['references']}
-    return bool(known and mine and not known & mine)
+    if known and mine and not known & mine:
+        return True  # a different application reference for the same role: always the user's decision
+    if status_value(app) not in TERMINAL:
+        return False
+    # A closed application. A confirmation received before the latest APPROVED Gmail status decision (whose time
+    # is the email that carried the outcome) is part of the application's own history, typically re-read after a
+    # reconnect: it is linked, not proposed again. A manual status edit only records when the user clicked, not
+    # when the outcome happened, so it never proves that an email predates it: such confirmations stay in review.
+    approved = state.approved_at.get(str(app.id))
+    return not (approved and as_utc(msg.internal_at) <= approved)
 
 
 # --- writes ----------------------------------------------------------------------------------------------------
