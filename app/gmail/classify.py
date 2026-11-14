@@ -133,10 +133,59 @@ def tokens(text: str | None) -> set[str]:
 
 
 def employer_similar(a: str | None, b: str | None) -> bool:
-    na, nb = norm_name(a), norm_name(b)
-    if not na or not nb:
+    """Whole-word comparison after removing legal suffixes: equal names, or every word of one name occurs in the
+    other ("Acme" ~ "Acme Polska", "Allegro" ~ "Allegro.pl"). Never a raw substring ("ING" is not "Booking")."""
+    ta, tb = tokens(a), tokens(b)
+    if not ta or not tb:
         return False
-    return na == nb or na in nb or nb in na or bool(tokens(a) and tokens(a) == tokens(b))
+    return ta <= tb or tb <= ta
+
+
+_TITLE_STOPWORDS = {
+    'and', 'the', 'for', 'with', 'of', 'in', 'at', 'und', 'der', 'die', 'das', 'mit', 'oraz', 'dla', 'ds', 'et',
+    'de', 'la', 'le', 'del', 'en', 'mwd', 'fmd', 'mfd', 'wmd', 'kobieta', 'mężczyzna', 'all', 'genders',
+}
+# Phrases that invite the reader to apply (or advertise jobs); never evidence of a submitted application.
+CALL_TO_APPLY = (
+    'apply now', 'apply here', 'apply today', 'apply for this', 'click to apply', 'easy apply', 'we are hiring',
+    "we're hiring", 'join our team', 'job alert', 'jobs for you', 'recommended for you', 'new jobs', 'open roles',
+    'jetzt bewerben', 'bewirb dich', 'bewerben sie sich jetzt', 'aplikuj', 'zaaplikuj', 'oferty pracy dla ciebie',
+    'postulez', 'postuler maintenant', 'candidati ora', 'solicita ahora', 'aplica ya',
+)
+
+
+def _word_present(word: str, words: set[str]) -> bool:
+    if word in words:
+        return True
+    # Inflected forms (e.g. Polish "analityk" / "analityka"): accept a shared stem of five or more letters.
+    stem = word[:max(5, len(word) - 2)]
+    return len(word) >= 5 and any(w.startswith(stem) for w in words)
+
+
+def employer_grounded(employer: str | None, mini: Minimized) -> bool:
+    """The employer must be named in the subject, body or sender name, or match the sender's domain."""
+    wanted = tokens(employer)
+    if not wanted:
+        return False
+    seen = tokens(f'{mini.subject} {mini.text} {mini.sender_name}')
+    domain = set(re.split(r'[.\-]+', fold(mini.sender_domain)))
+    hits = sum(1 for w in wanted if _word_present(w, seen) or w in domain)
+    return hits >= max(1, (len(wanted) + 1) // 2)
+
+
+def title_grounded(title: str | None, mini: Minimized) -> bool:
+    """Most significant words of the job title must appear in the subject or body (not just the model's mind)."""
+    wanted = {w for w in tokens(title) if len(w) >= 3 and w not in _TITLE_STOPWORDS} or tokens(title)
+    if not wanted:
+        return False
+    seen = tokens(f'{mini.subject} {mini.text}')
+    hits = sum(1 for w in wanted if _word_present(w, seen))
+    return hits >= max(1, -(-len(wanted) * 3 // 5))  # at least 60%, rounded up
+
+
+def call_to_apply(*texts: str | None) -> bool:
+    folded = ' '.join(fold(t) for t in texts if t)
+    return any(p in folded for p in CALL_TO_APPLY)
 
 
 def title_similarity(a: str | None, b: str | None) -> float:
@@ -190,6 +239,8 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
     seen: dict[str, int] = {}
     if not analysis.is_recruitment:
         return {'items': [], 'is_recruitment': False}
+    # Shortlisted applications whose employer the email itself names (independent of the model's choice).
+    mentioned = [a['application_id'] for a in shortlist if employer_grounded(a['company'], mini)]
     for raw in analysis.items[:5]:
         quote = (raw.supporting_quote or '').strip()
         quote_ok = len(fold(quote)) >= 8 and fold(quote) in haystack
@@ -206,7 +257,14 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
         seen[key] = seen.get(key, 0) + 1
         if seen[key] > 1:
             key = f'{key}-{seen[key]}'
+        grounded_employer = employer_grounded(employer, mini)
         items.append({
+            # Backend grounding signals used by the import and linking policy (no email text is stored).
+            'employer_grounded': grounded_employer,
+            'title_grounded': title_grounded(title, mini),
+            'quote_strong': quote_ok and len(fold(quote)) >= 20,
+            'call_to_apply': call_to_apply(quote, mini.subject),
+            'mentioned_app_ids': mentioned,
             'key': key, 'kind': raw.kind, 'event_type': raw.event_type, 'employer': employer, 'job_title': title,
             'references': refs, 'quote': quote[:300] if quote_ok else None, 'quote_ok': quote_ok,
             'evidence': raw.application_evidence, 'confidence': raw.confidence,

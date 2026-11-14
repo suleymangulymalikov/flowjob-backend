@@ -122,6 +122,21 @@ async def purge(user_id: PydanticObjectId, connection_id: PydanticObjectId) -> N
     await GmailMessage.get_pymongo_collection().delete_many({'connection_id': connection_id})
 
 
+async def purge_if_disconnected(user_id: PydanticObjectId, connection_id: PydanticObjectId) -> bool:
+    """Post-write guard for work that raced a disconnect. If the connection is gone or being disconnected, erase
+    everything written for it (idempotent, keyed by connection) and return True.
+
+    Running this AFTER a write closes the race: either the disconnect's own purge runs later and removes the write,
+    or this check sees the disconnect and removes it.
+    """
+    doc = await GmailConnection.get_pymongo_collection().find_one(
+        {'_id': connection_id, 'user_id': user_id}, {'status': 1})
+    if doc is not None and doc.get('status') != 'disconnecting':
+        return False
+    await purge(user_id, connection_id)
+    return True
+
+
 async def disconnect(conn: GmailConnection) -> None:
     # 1. Fence: no renewal can succeed once the status leaves 'active', so in-flight work stops writing.
     await GmailConnection.get_pymongo_collection().update_one(

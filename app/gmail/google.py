@@ -26,6 +26,7 @@ GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me'
 GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
 SCOPES = ('openid', 'email', GMAIL_SCOPE)
 ISSUERS = ('https://accounts.google.com', 'accounts.google.com')
+CLOCK_SKEW_SECONDS = 60
 
 
 class GoogleError(Exception):
@@ -46,6 +47,12 @@ class GoogleUnavailable(GoogleError):
 
 class GoogleRejected(GoogleError):
     code = 'gmail_rejected'
+
+
+class GmailBadRequest(GoogleError):
+    """Gmail rejected the request itself (e.g. an expired or invalid page token)."""
+
+    code = 'gmail_bad_request'
 
 
 class MessageGone(GoogleError):
@@ -167,6 +174,7 @@ class GoogleApi:
             claims = jwt.decode(
                 token, key.key, algorithms=['RS256'], audience=settings.google_oauth_client_id,
                 options={'require': ['iss', 'aud', 'exp', 'sub', 'iat']},
+                leeway=CLOCK_SKEW_SECONDS,  # tolerate small clock differences; signature, aud, iss still strict
             )
         except (jwt.PyJWTError, jwt.PyJWKClientError):
             raise IdTokenInvalid() from None
@@ -186,6 +194,8 @@ class GoogleApi:
             raise MessageGone()
         if response.status_code in (401, 403):
             raise GoogleRejected()
+        if response.status_code == 400:
+            raise GmailBadRequest()
         if response.status_code != 200:
             raise GoogleUnavailable()
         return response.json()

@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.auth.dependencies import get_current_user
 from app.config import settings
 from app.applications.router import owned, present_full
-from app.gmail import oauth, reviews, sync
+from app.gmail import crypto, oauth, reviews, sync
 from app.gmail.connection import as_utc, connection_for, disconnect, now
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview
 from app.integration.router import secure_cookie
@@ -31,7 +31,13 @@ ERROR_MESSAGES = {
     'ai_unavailable': 'Email analysis is unavailable right now. Try Sync now later.',
     'quota_reached': 'Today\'s email analysis limit was reached. Remaining emails continue on the next sync.',
     'sync_error': 'The sync stopped unexpectedly. Try Sync now.',
+    'gmail_bad_request': 'Gmail rejected the search. Try Sync now; reconnect Gmail if this continues.',
+    'config_error': 'Gmail is misconfigured on this server. Contact the FlowJob administrator.',
 }
+
+
+def gmail_ready() -> bool:
+    return settings.gmail_configured and crypto.key_problem() is None
 
 
 def _iso(value) -> str | None:
@@ -42,7 +48,7 @@ def _iso(value) -> str | None:
 async def gmail_status(user: User) -> dict[str, Any]:
     conn = await connection_for(user.id)
     pending = await GmailReview.find(GmailReview.user_id == user.id, GmailReview.state == 'pending').count()
-    base: dict[str, Any] = {'available': settings.gmail_configured, 'pendingReviewCount': pending}
+    base: dict[str, Any] = {'available': gmail_ready(), 'pendingReviewCount': pending}
     if conn is None:
         return {**base, 'connection': {'state': 'not_connected'}, 'sync': None}
 
@@ -96,6 +102,8 @@ class OAuthStartInput(BaseModel):
 async def oauth_start(data: OAuthStartInput, user: CurrentUser, request: Request, response: Response):
     if not settings.gmail_configured:
         raise HTTPException(503, 'Gmail is not configured on this server.')
+    if crypto.key_problem():
+        raise HTTPException(503, 'Gmail is misconfigured on this server.')
     try:
         result = await oauth.start(user, data.mode, data.timezone)
     except oauth.OAuthFailure as failure:
@@ -124,7 +132,7 @@ async def oauth_callback(
     error: str | None = None,
     flowjob_gmail_oauth: Annotated[str | None, Cookie()] = None,
 ):
-    if not settings.gmail_configured:
+    if not gmail_ready():
         target = _frontend({'gmail': 'error', 'reason': 'not_configured'})
     else:
         try:

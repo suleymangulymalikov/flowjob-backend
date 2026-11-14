@@ -38,7 +38,8 @@ def _decode_key(raw: str) -> bytes:
             continue
         if len(key) == 32:
             return key
-    raise TokenCryptoError('GMAIL_TOKEN_KEY must be a base64-encoded 32-byte key.')
+    raise TokenCryptoError('GMAIL_TOKEN_KEY (and every GMAIL_TOKEN_KEYS_OLD entry) must be a base64-encoded '
+                           '32-byte key.')
 
 
 def _key_id(key: bytes) -> str:
@@ -54,6 +55,15 @@ def _keys() -> tuple[bytes, dict[str, bytes]]:
         old = _decode_key(raw)
         ring.setdefault(_key_id(old), old)
     return current, ring
+
+
+def key_problem() -> str | None:
+    """A safe description of a key configuration problem (never the key), or None when usable."""
+    try:
+        _keys()
+    except TokenCryptoError as error:
+        return str(error)
+    return None
 
 
 def encrypt(plaintext: str, aad: str) -> str:

@@ -30,11 +30,13 @@ from beanie import PydanticObjectId
 from pymongo import ASCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from app.applications.models import Application
 from app.config import settings
-from app.gmail.connection import access_token, acquire_lock, as_utc, now, purge, release_lock, renew_lock
-from app.gmail.google import GoogleError, InvalidGrant, MessageGone, api
-from app.gmail.models import GmailConnection, GmailMessage, GmailReview
+from app.gmail.connection import (
+    access_token, acquire_lock, as_utc, now, purge_if_disconnected, release_lock, renew_lock,
+)
+from app.gmail.google import GmailBadRequest, GoogleError, InvalidGrant, MessageGone, api
+from app.gmail.crypto import TokenCryptoError
+from app.gmail.models import GmailConnection, GmailMessage
 from app.gmail.preprocess import internal_at, is_candidate
 
 _log = logging.getLogger(__name__)
@@ -125,6 +127,18 @@ async def spawn(coro: Coroutine[Any, Any, Any]) -> None:
     task.add_done_callback(_tasks.discard)
 
 
+async def shutdown() -> None:
+    """Cancel and await this process's background syncs (FastAPI shutdown / reload), before the database closes.
+
+    Cancellation runs each run's ``finally`` (lock release, quota refund); claimed messages resume next run.
+    """
+    tasks = [t for t in _tasks if not t.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def launch_sync(conn_id: PydanticObjectId, *, trigger: str, retry_failed: bool = False) -> bool:
     """Take the lock now (so callers learn about contention immediately) and run in the background."""
     owner = uuid.uuid4().hex
@@ -144,11 +158,15 @@ async def run_now(conn_id: PydanticObjectId, *, trigger: str, retry_failed: bool
 
 async def run_locked(conn_id: PydanticObjectId, owner: str, *, trigger: str, retry_failed: bool) -> RunSummary:
     summary = RunSummary(trigger=trigger)
+    # Remember the owner now: if a disconnect deletes the connection mid-run, cleanup still knows whose data it is.
+    doc = await GmailConnection.get_pymongo_collection().find_one({'_id': conn_id}, {'user_id': 1})
+    user_id = doc['user_id'] if doc else None
     try:
         await _run(conn_id, owner, summary, retry_failed)
     except Fenced:
         summary.stoppedReason = summary.stoppedReason or 'lock_lost'
-        await _after_fence_loss(conn_id)
+        if user_id is not None:
+            await purge_if_disconnected(user_id, conn_id)
     except Exception as error:
         # Type only: exception messages may echo email-derived values.
         _log.error('Gmail sync stopped unexpectedly (%s).', type(error).__name__)
@@ -157,22 +175,6 @@ async def run_locked(conn_id: PydanticObjectId, owner: str, *, trigger: str, ret
     finally:
         await release_lock(conn_id, owner)
     return summary
-
-
-async def _after_fence_loss(conn_id: PydanticObjectId) -> None:
-    """If the lock was lost to a disconnect, erase anything this worker wrote after the disconnect's purge."""
-    doc = await GmailConnection.get_pymongo_collection().find_one({'_id': conn_id}, {'status': 1, 'user_id': 1})
-    if doc is None or doc.get('status') == 'disconnecting':
-        user_id = doc['user_id'] if doc else None
-        if user_id is None:
-            # The connection is already gone; its user id is on any ledger row this worker may have written.
-            row = await GmailMessage.get_pymongo_collection().find_one({'connection_id': conn_id}, {'user_id': 1})
-            row = row or await GmailReview.get_pymongo_collection().find_one({'connection_id': conn_id}, {'user_id': 1})
-            row = row or await Application.get_pymongo_collection().find_one(
-                {'gmail_connection_id': conn_id}, {'user_id': 1})
-            user_id = row['user_id'] if row else None
-        if user_id is not None:
-            await purge(user_id, conn_id)
 
 
 async def _finish(conn_id: PydanticObjectId, owner: str, summary: RunSummary, *, attention: str | None = None,
@@ -212,6 +214,11 @@ async def _run(conn_id: PydanticObjectId, owner: str, summary: RunSummary, retry
 
     try:
         token = await access_token(conn)
+    except TokenCryptoError:
+        # Missing/rotated encryption key: a configuration problem only the operator can fix. Do not repeat it.
+        summary.stoppedReason = 'config_error'
+        await _finish(conn_id, owner, summary, attention='config_error')
+        return
     except InvalidGrant:
         summary.stoppedReason = 'reauth_required'
         await _finish(conn_id, owner, summary)
@@ -262,9 +269,19 @@ async def _enumerate(ctx: SyncContext) -> bool:
         await coll.update_one({'_id': conn_id, 'lock_owner': ctx.owner},
                               {'$set': {'window_after': after, 'window_before': before, 'page_token': None}})
 
+    restarted = False
     for _ in range(settings.gmail_max_list_pages_per_run):
         try:
             listing = await api().list_messages(await ctx.access(), _query(after, before), page)
+        except GmailBadRequest:
+            if page and not restarted:
+                # Gmail no longer accepts the saved page token: list this same window again from the start, once.
+                # Already recorded messages are skipped by the ledger, so nothing is duplicated or lost.
+                restarted, page = True, None
+                await ctx.fence()
+                await coll.update_one({'_id': conn_id, 'lock_owner': ctx.owner}, {'$set': {'page_token': None}})
+                continue
+            raise StopRun('gmail_bad_request', attention=True) from None
         except GoogleError as error:
             raise StopRun(error.code if error.code != 'message_gone' else 'gmail_unavailable', attention=True) from None
         await ctx.fence()

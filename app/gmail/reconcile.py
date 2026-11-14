@@ -25,7 +25,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.applications.models import Application, ApplicationEvent, ApplicationStatus
 from app.gmail.classify import employer_similar, norm_name, norm_ref, title_similarity
-from app.gmail.connection import as_utc, now
+from app.gmail.connection import as_utc, now, purge_if_disconnected
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview, GmailSuppression
 
 NON_APPLICATION_KINDS = {'job_advertisement', 'invitation_to_apply', 'newsletter', 'other'}
@@ -140,40 +140,56 @@ class Resolution:
 
 
 def resolve(item: dict[str, Any], msg: GmailMessage, state: UserState) -> Resolution:
-    by_id = {str(a.id): a for a in state.apps}
-    item_refs = {norm_ref(r) for r in item['references']}
-    ref_hits = {aid for aid, refs in state.refs.items() if item_refs & refs and aid in by_id}
-    if len(ref_hits) == 1:
-        return Resolution('linked', by_id[next(iter(ref_hits))], 'reference')
-    thread_hits = {aid for aid in state.thread_apps.get(msg.thread_id or '', set()) if aid in by_id}
+    """Link only on independent evidence; the model's choice alone never links.
 
-    def compatible(a: Application) -> bool:
-        if item['employer'] and not employer_similar(a.company, item['employer']):
-            return False
+    Employer identity: the item's employer when the email states one, otherwise the application's employer must be
+    named in the email itself. A matching title alone never identifies an application.
+    """
+    by_id = {str(a.id): a for a in state.apps}
+    mentioned = set(item.get('mentioned_app_ids') or [])
+
+    def employer_ok(a: Application) -> bool:
+        if item['employer']:
+            return employer_similar(a.company, item['employer'])
+        return str(a.id) in mentioned
+
+    def title_ok(a: Application) -> bool:
         return not item['job_title'] or title_similarity(a.job_title, item['job_title']) >= TITLE_MATCH
 
-    thread_ok = [by_id[aid] for aid in thread_hits if compatible(by_id[aid])]
-    if len(thread_ok) == 1 and not ref_hits:
+    # 1. A verified reference, but only within a compatible employer (identical IDs recur across companies).
+    item_refs = {norm_ref(r) for r in item['references']}
+    ref_hits = [by_id[aid] for aid, refs in state.refs.items() if item_refs & refs and aid in by_id]
+    ref_ok = [a for a in ref_hits if employer_ok(a)]
+    if len(ref_ok) == 1:
+        return Resolution('linked', ref_ok[0], 'reference')
+
+    # 2. The same Gmail thread is strong identity evidence; stated employer/title must not contradict it.
+    thread_hits = [by_id[aid] for aid in state.thread_apps.get(msg.thread_id or '', set()) if aid in by_id]
+    thread_ok = [a for a in thread_hits if title_ok(a)
+                 and (not item['employer'] or employer_similar(a.company, item['employer']))]
+    if len(thread_ok) == 1 and not ref_ok:
         return Resolution('linked', thread_ok[0], 'thread')
 
-    similar = [a for a in state.apps if item['employer'] and employer_similar(a.company, item['employer'])
-               and (not item['job_title'] or title_similarity(a.job_title, item['job_title']) >= TITLE_MATCH)]
-    pool = {str(a.id): a for a in [*similar, *(by_id[i] for i in ref_hits), *thread_ok,
+    # 3. Employer-confirmed candidates. Without a stated title, only a single application at that employer counts.
+    similar = [a for a in state.apps if employer_ok(a) and title_ok(a)]
+    # Reference hits that cannot be confirmed (the email names no employer) stay as candidates for the user;
+    # hits whose employer contradicts the email are discarded.
+    unconfirmed_refs = ref_hits if not item['employer'] else ref_ok
+    pool = {str(a.id): a for a in [*similar, *unconfirmed_refs, *thread_ok,
                                    *(by_id[i] for i in item['candidate_ids'] if i in by_id)]}
     chosen = by_id.get(item['match_id'] or '')
+    if chosen is not None and chosen in similar:
+        best = title_similarity(chosen.job_title, item['job_title']) if item['job_title'] else 0.0
+        rivals = [a for a in similar if a.id != chosen.id
+                  and (not item['job_title'] or title_similarity(a.job_title, item['job_title']) >= best)]
+        if not rivals:
+            return Resolution('linked', chosen, 'model')
     if chosen is not None:
-        if compatible(chosen):
-            best = title_similarity(chosen.job_title, item['job_title']) if item['job_title'] else 0
-            rivals = [a for a in similar if a.id != chosen.id and item['job_title']
-                      and title_similarity(a.job_title, item['job_title']) >= best]
-            if not rivals and (item['job_title'] or len(similar) <= 1):
-                return Resolution('linked', chosen, 'model')
         pool[str(chosen.id)] = chosen
-        return Resolution('ambiguous', candidates=list(pool.values()))
-    exact = [a for a in similar if norm_name(a.job_title) == norm_name(item['job_title'])
-             and norm_name(a.company) == norm_name(item['employer'])]
-    if len(exact) == 1 and len(similar) == 1:
-        return Resolution('linked', exact[0], 'exact')
+    if chosen is None and item['employer'] and item['job_title']:
+        exact = [a for a in similar if norm_name(a.job_title) == norm_name(item['job_title'])]
+        if len(exact) == 1 and len(similar) == 1:
+            return Resolution('linked', exact[0], 'exact')
     if pool:
         return Resolution('ambiguous', candidates=list(pool.values()))
     return Resolution('none')
@@ -200,8 +216,15 @@ def auto_import_ok(item: dict[str, Any]) -> tuple[bool, str]:
         return False, 'missing_details'
     if item['contradictions']:
         return False, 'contradictory'
-    if item['confidence'] != 'high' or not item['quote_ok'] or item['alias_invalid']:
+    if item['confidence'] != 'high' or not item.get('quote_strong') or item['alias_invalid']:
         return False, 'uncertain'
+    # Grounding: the stated employer and position must come from the email, not only from the model.
+    if not item.get('employer_grounded'):
+        return False, 'ungrounded_employer'
+    if not (item.get('title_grounded') or item['references']):
+        return False, 'ungrounded_title'
+    if item.get('call_to_apply'):
+        return False, 'possible_advertisement'
     evidence = item['evidence']
     if evidence == 'confirmation' and item['event_type'] in ('application_confirmation', 'application_update'):
         return True, 'confirmation'
@@ -473,6 +496,7 @@ async def on_application_deleted(app: Application) -> None:
             references=sorted({r for e in gmail_events for r in e.references}),
             employer_norm=norm_name(app.company), title_norm=norm_name(app.job_title),
         ).insert()
+        await purge_if_disconnected(app.user_id, conn.id)  # a suppression must not outlive a racing disconnect
     await ApplicationEvent.get_pymongo_collection().delete_many({'application_id': app.id, 'user_id': app.user_id})
     await GmailReview.get_pymongo_collection().update_many(
         {'user_id': app.user_id, 'application_id': app.id, 'state': 'pending'},

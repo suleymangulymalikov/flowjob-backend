@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -22,11 +23,16 @@ async def lifespan(app: FastAPI):
     from app.gmail.scheduler import scheduler
     if settings.gmail_scheduler_enabled:
         scheduler.start()
+    from app.gmail import crypto, sync
+    if settings.gmail_configured and crypto.key_problem():
+        # Never log the key itself; Gmail stays unavailable until the configuration is fixed.
+        logging.getLogger('app.gmail').error('Gmail is disabled: %s', crypto.key_problem())
     try:
         yield
     finally:
         if settings.gmail_scheduler_enabled:
             await scheduler.stop()
+        await sync.shutdown()  # cancel in-flight manual syncs before the database client closes
         await client.close()
 
 

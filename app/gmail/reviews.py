@@ -17,7 +17,7 @@ from pymongo.errors import DuplicateKeyError
 from app.applications.models import Application, ApplicationEvent, ApplicationStatus
 from app.gmail import reconcile
 from app.gmail.classify import EVENT_TYPES
-from app.gmail.connection import as_utc, connection_for, now
+from app.gmail.connection import as_utc, connection_for, now, purge_if_disconnected
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview
 
 _GMAIL_ID = re.compile(r'^[0-9a-f]{8,32}$')
@@ -138,6 +138,18 @@ async def _active_connection(review: GmailReview) -> GmailConnection:
 
 async def approve(review_id: str, user_id, edits: dict[str, Any]) -> dict[str, Any]:
     review = await owned_review(review_id, user_id)
+    try:
+        result = await _approve(review, edits)
+    except BaseException:
+        await purge_if_disconnected(review.user_id, review.connection_id)
+        raise
+    # An approval that raced the user's own disconnect must not leave Gmail ids or excerpts behind.
+    if await purge_if_disconnected(review.user_id, review.connection_id):
+        raise HTTPException(409, 'Gmail was disconnected, so this suggestion no longer applies.')
+    return result
+
+
+async def _approve(review: GmailReview, edits: dict[str, Any]) -> dict[str, Any]:
     if review.state != 'pending':
         if review.state == 'approved':
             return {'review': review.state}
@@ -218,18 +230,26 @@ async def _approve_status(review: GmailReview, edits: dict[str, Any]) -> dict[st
         current = await apps.find_one({'_id': review.application_id, 'user_id': review.user_id},
                                        {'last_approved_review_id': 1})
         if current and current.get('last_approved_review_id') == review.id:
-            await _finish(review, 'approved')  # a concurrent approval already applied it
+            # Applied by a concurrent approval, or by an earlier attempt that was interrupted before finishing:
+            # repair the history entry if that attempt never wrote it, then finish.
+            await _ensure_status_event(review, p.get('from'), target.value)
+            await _finish(review, 'approved')
             return {'review': 'approved', 'applicationId': str(review.application_id)}
         await _finish(review, 'invalidated')
         raise HTTPException(409, 'This suggestion is out of date: the application changed since it was made.')
+    await _ensure_status_event(review, p.get('from'), target.value)
+    await _finish(review, 'approved')
+    return {'review': 'approved', 'applicationId': str(review.application_id)}
+
+
+async def _ensure_status_event(review: GmailReview, status_from: str | None, status_to: str) -> None:
+    """The approved-status history entry, written at most once per review (marker ``review:<id>``)."""
     marker = f'review:{review.id}'
     if not await ApplicationEvent.find_one(ApplicationEvent.user_id == review.user_id,
                                            ApplicationEvent.item_key == marker).exists():
         await ApplicationEvent(user_id=review.user_id, application_id=review.application_id, source='gmail_approved',
-                               event_type='status_change', occurred_at=review.internal_at, status_from=p.get('from'),
-                               status_to=target.value, item_key=marker).insert()
-    await _finish(review, 'approved')
-    return {'review': 'approved', 'applicationId': str(review.application_id)}
+                               event_type='status_change', occurred_at=review.internal_at, status_from=status_from,
+                               status_to=status_to, item_key=marker).insert()
 
 
 async def _approve_schedule(review: GmailReview) -> dict[str, Any]:
@@ -254,6 +274,15 @@ async def dismiss(review_id: str, user_id) -> dict[str, Any]:
         return {'review': 'dismissed'}
     if review.state != 'pending':
         raise HTTPException(409, 'This suggestion is no longer pending.')
+    if review.kind == 'status_change' and review.application_id:
+        applied = await Application.get_pymongo_collection().find_one(
+            {'_id': review.application_id, 'user_id': user_id, 'last_approved_review_id': review.id},
+            {'status': 1})
+        if applied:
+            # An interrupted approval already changed the status: record it truthfully instead of "dismissed".
+            await _ensure_status_event(review, review.proposal.get('from'), applied['status'])
+            await _finish(review, 'approved')
+            raise HTTPException(409, 'This suggestion was already approved.')
     await _finish(review, 'dismissed')  # kept while connected: the same item is never proposed again
     if review.application_id:
         await Application.get_pymongo_collection().update_one(
