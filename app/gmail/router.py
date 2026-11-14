@@ -131,8 +131,8 @@ async def oauth_callback(
             result = await oauth.complete(code=code, state=state, error=error, cookie=flowjob_gmail_oauth)
         except oauth.OAuthFailure as failure:
             target = _frontend({'gmail': 'error', 'reason': failure.code})
-        except Exception:  # never surface a stack trace or provider detail to the browser
-            _log.exception('Gmail OAuth callback failed.')
+        except Exception as error:  # never surface a stack trace or provider detail to the browser
+            _log.error('Gmail OAuth callback failed (%s).', type(error).__name__)
             target = _frontend({'gmail': 'error', 'reason': 'exchange_failed'})
         else:
             # Initial 30-day backfill (or resumption after a reconnect) starts right away in the background.

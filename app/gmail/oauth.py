@@ -73,6 +73,9 @@ async def start(user: User, mode: str, timezone: str | None) -> StartResult:
     browser_nonce = secrets.token_urlsafe(32)
     oidc_nonce = secrets.token_urlsafe(24)
     state_hash = _digest(state)
+    # Only the latest flow per user stays valid (the browser cookie is overwritten anyway); this also bounds
+    # how many pending states one account can create.
+    await GmailOAuthState.get_pymongo_collection().delete_many({'user_id': user.id})
     await GmailOAuthState(
         state_hash=state_hash, user_id=user.id, mode=mode, nonce_hash=_digest(browser_nonce),
         enc_verifier=crypto.encrypt(verifier, f'gmail-oauth:{state_hash}'), oidc_nonce=oidc_nonce,

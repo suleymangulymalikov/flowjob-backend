@@ -338,3 +338,23 @@ def test_disconnect_erases_gmail_data_and_keeps_applications(client, fake_google
     assert status['connection']['state'] == 'not_connected' and status['pendingReviewCount'] == 0
     # A fresh connect afterwards is allowed again.
     connect(client, headers)
+
+
+def test_concurrent_callbacks_cannot_both_claim_one_google_account(client, fake_google):
+    from app.gmail import oauth
+    one = signup(client, 'one@example.com')
+    first, cookie_one = start_flow(client, one)
+    two = signup(client, 'two@example.com')
+    second, cookie_two = start_flow(client, two)
+
+    async def race():
+        import asyncio
+        return await asyncio.gather(
+            oauth.complete(code='c1', state=first['state'], error=None, cookie=cookie_one),
+            oauth.complete(code='c2', state=second['state'], error=None, cookie=cookie_two),
+            return_exceptions=True)
+    results = run(client, race())
+    assert sum(isinstance(r, oauth.CallbackResult) for r in results) == 1
+    assert [r.code for r in results if isinstance(r, oauth.OAuthFailure)] == ['account_in_use']
+    assert run(client, GmailConnection.find_all().count()) == 1
+    assert fake_google.revoked == []

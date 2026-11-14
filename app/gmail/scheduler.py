@@ -77,8 +77,8 @@ class GmailScheduler:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                _log.exception('Gmail scheduler tick failed.')
+            except Exception as error:
+                _log.error('Gmail scheduler tick failed (%s).', type(error).__name__)
             await asyncio.sleep(settings.gmail_scheduler_tick_seconds)
 
     def start(self) -> None:

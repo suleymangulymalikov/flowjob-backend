@@ -136,3 +136,43 @@ An access JWT already issued remains valid until its expiry, 15 minutes by
 default. The browser shares refresh work within its current tab and waits for
 an in-flight refresh before sending logout so the rotated cookie can be
 revoked.
+
+## Gmail integration (optional)
+
+Gmail lives on the Applications page. FlowJob login is unchanged; Gmail is an optional, read-only connection
+(`gmail.readonly` plus `openid email`). Without `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` and
+`GMAIL_TOKEN_KEY`, `GET /api/v1/gmail` reports `available: false` and nothing else changes.
+
+What it does: after connecting, the backend lists the last 30 days of mail (Spam/Trash excluded, Promotions
+included), filters candidates by metadata, minimizes each candidate (quoted history, signatures, contact details
+and tracking URLs removed; attachments never read) and asks the model for structured, multilingual output. The
+backend verifies quotes and references and decides every write: strongly evidenced applications are imported
+(status Applied, no CV), uncertain ones go to Needs Review, and status changes of existing applications always
+need approval. Full email bodies and access tokens are never stored; the refresh token is AES-256-GCM encrypted.
+It syncs every 3 hours while the backend runs (`GMAIL_SCHEDULER_ENABLED=true`) and on Sync now. Failed emails wait
+for Retry sync. Disconnect revokes the grant and erases Gmail data (credentials, excerpts, suggestions, progress);
+applications and approved statuses stay.
+
+### Setting up Google OAuth for local testing (done by the project owner, not by code)
+
+1. In Google Cloud Console, create (or choose) a project and enable the **Gmail API**.
+2. Configure the **OAuth consent screen**: user type **External**, publishing status **Testing**. Add the scopes
+   `openid`, `.../auth/userinfo.email` and `https://www.googleapis.com/auth/gmail.readonly`.
+3. Add each tester's Google address under **Test users** (Testing mode allows at most 100).
+4. Create **Credentials → OAuth client ID → Web application**. Add the Authorized redirect URI
+   `http://localhost:5173/api/v1/gmail/oauth/callback` (the Vite dev proxy keeps the binding cookie same-origin;
+   use the same host name, `localhost`, in the browser).
+5. Put the client id and secret into your backend `.env` (never commit it), generate `GMAIL_TOKEN_KEY` with the
+   command in `.env.example`, set `FRONTEND_BASE_URL`, and optionally `GMAIL_SCHEDULER_ENABLED=true`.
+6. Restart the backend (settings are read at start-up).
+
+Testing-mode limits: Google issues refresh tokens that expire after about **7 days** for this scope, so testers
+will see "Reconnect Gmail" weekly; reconnecting with the same account keeps all progress. `gmail.readonly` is a
+restricted scope: a public launch needs Google verification and a security assessment, which this MVP does not
+claim. The in-process scheduler only runs while the backend process runs.
+
+### Gmail behaviour in tests
+
+Tests replace Google (OAuth, ID tokens and the Gmail API) and the model with deterministic fakes
+(`tests/gmail_fakes.py`, `tests/test_gmail_pipeline.py`). No test reaches Google or OpenAI. A mocked OAuth
+callback is not proof that a real Google client is configured.

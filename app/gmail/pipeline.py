@@ -24,7 +24,7 @@ from app.users.models import User
 async def analyze_message(ctx: SyncContext, msg: GmailMessage) -> dict | None:
     conn = ctx.connection
     try:
-        full = await api().get_full(ctx.token, msg.message_id)
+        full = await api().get_full(await ctx.access(), msg.message_id)
     except MessageGone:
         return None
     except GoogleError as error:

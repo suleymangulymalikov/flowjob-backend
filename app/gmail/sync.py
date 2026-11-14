@@ -77,16 +77,32 @@ class RunSummary:
     finishedAt: str | None = None  # noqa: N815
 
 
+ACCESS_TOKEN_REUSE = timedelta(minutes=45)  # Google access tokens last about an hour
+
+
 @dataclass
 class SyncContext:
     connection: GmailConnection
     owner: str
     token: str
     summary: RunSummary = field(default_factory=RunSummary)
+    token_at: Any = field(default_factory=now)
 
     async def fence(self) -> None:
         if not await renew_lock(self.connection.id, self.owner):
             raise Fenced()
+
+    async def access(self) -> str:
+        """The access token, refreshed in memory when a long run gets close to its expiry."""
+        if now() - self.token_at > ACCESS_TOKEN_REUSE:
+            try:
+                self.token = await access_token(self.connection)
+            except InvalidGrant:
+                raise StopRun('reauth_required', attention=False) from None
+            except GoogleError:
+                raise StopRun('gmail_unavailable', attention=True) from None
+            self.token_at = now()
+        return self.token
 
 
 Processor = Callable[[SyncContext, GmailMessage], Awaitable[str]]
@@ -133,8 +149,9 @@ async def run_locked(conn_id: PydanticObjectId, owner: str, *, trigger: str, ret
     except Fenced:
         summary.stoppedReason = summary.stoppedReason or 'lock_lost'
         await _after_fence_loss(conn_id)
-    except Exception:
-        _log.exception('Gmail sync stopped unexpectedly.')
+    except Exception as error:
+        # Type only: exception messages may echo email-derived values.
+        _log.error('Gmail sync stopped unexpectedly (%s).', type(error).__name__)
         summary.stoppedReason = 'sync_error'
         await _finish(conn_id, owner, summary, attention='sync_error')
     finally:
@@ -247,7 +264,7 @@ async def _enumerate(ctx: SyncContext) -> bool:
 
     for _ in range(settings.gmail_max_list_pages_per_run):
         try:
-            listing = await api().list_messages(ctx.token, _query(after, before), page)
+            listing = await api().list_messages(await ctx.access(), _query(after, before), page)
         except GoogleError as error:
             raise StopRun(error.code if error.code != 'message_gone' else 'gmail_unavailable', attention=True) from None
         await ctx.fence()
@@ -273,7 +290,7 @@ async def _record(ctx: SyncContext, ref: dict[str, Any]) -> None:
     if await messages.find_one({'connection_id': ctx.connection.id, 'message_id': message_id}, {'_id': 1}):
         return  # already known (overlap window, duplicate listing)
     try:
-        meta = await api().get_metadata(ctx.token, message_id)
+        meta = await api().get_metadata(await ctx.access(), message_id)
     except MessageGone:
         return  # deleted between listing and fetching
     except GoogleError as error:
@@ -334,8 +351,8 @@ async def _process(ctx: SyncContext) -> None:
                 ctx.summary.failed += 1
                 await _settle(ctx, msg, {'state': 'failed', 'error_code': failure.code})
                 continue
-            except Exception:
-                _log.exception('A Gmail message could not be processed.')
+            except Exception as error:
+                _log.error('A Gmail message could not be processed (%s).', type(error).__name__)
                 ctx.summary.failed += 1
                 await _settle(ctx, msg, {'state': 'failed', 'error_code': 'processing_error'})
                 continue

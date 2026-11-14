@@ -415,3 +415,14 @@ def test_minimize_html_and_multilingual_quotes():
     german = 'Vielen Dank für Ihre Bewerbung als Werkstudent.\n\nAm 2. März 2026 schrieb Ana <a@x.example>:\n> alt'
     out = minimize(make_message('g', subject='Bewerbung', body=german), user_name='Ana', user_email='a@x.example')
     assert 'Werkstudent' in out.text and 'alt' not in out.text
+
+
+def test_long_runs_refresh_the_access_token(client, fake_google, recorder, monkeypatch):
+    headers = signup(client)
+    connect(client, headers)
+    conn = the_conn(client)
+    add_jobs(fake_google, 3, days_ago=0)
+    refreshed = len(fake_google.refreshed)
+    monkeypatch.setattr(sync, 'ACCESS_TOKEN_REUSE', timedelta(seconds=-1))  # every use counts as "old"
+    manual(client, conn.id)
+    assert len(fake_google.refreshed) > refreshed + 1
