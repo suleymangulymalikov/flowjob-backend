@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.gmail.preprocess import Minimized
 
-GMAIL_PROMPT_VERSION = 'gmail-1'
+GMAIL_PROMPT_VERSION = 'gmail-2'
 
 EventType = Literal[
     'application_confirmation', 'application_update', 'assessment', 'recruiter_follow_up', 'interview_invitation',
@@ -38,7 +38,8 @@ class EmailItem(BaseModel):
     application_evidence: Literal['confirmation', 'reference', 'active_process', 'none']
     confidence: Literal['high', 'medium', 'low']
     contradictions: list[str] = Field(default_factory=list, max_length=3)
-    match_key: str | None = Field(default=None, max_length=8)
+    # Generous length: placeholders such as "no match found" are normalized by resolve_key, not rejected wholesale.
+    match_key: str | None = Field(default=None, max_length=40)
     candidate_keys: list[str] = Field(default_factory=list, max_length=5)
     proposed_status: Literal['Applied', 'Interview', 'Offer', 'Rejected', 'Withdrawn'] | None = None
     scheduled_at: str | None = Field(default=None, max_length=40)
@@ -75,11 +76,15 @@ Return one item per distinct position the email is about (most emails have zero 
   the classification. Keep its original language. Do not translate or paraphrase.
 - application_evidence: confirmation (explicit receipt confirmation), reference (an application ID of the user),
   active_process (an assessment/interview/offer/rejection addressed to the user about this position), none.
-- confidence: high only when the email itself clearly supports kind, employer and job_title.
+- confidence: high when the email itself clearly supports kind, employer and job_title. An explicit statement
+  that the user's application was received or submitted, for a position and employer the email names, is
+  normally high. Use medium or low only when something is genuinely unclear (e.g. which role, or whether the
+  user applied at all).
 - contradictions: anything in the email that conflicts (e.g. two different job titles for one item).
 - match_key: the key (A1, A2, ...) of the user's existing application this item is about, only when clearly the
-  same employer AND position (or the same reference); otherwise null. Different positions at one employer are
-  different applications. candidate_keys: other plausible keys when unsure.
+  same employer AND position (or the same reference). When no listed application matches, return null (JSON
+  null, not a word such as "none"). Different positions at one employer are different applications.
+  candidate_keys: other plausible keys when unsure; an empty list otherwise.
 - proposed_status: the application status this email supports (Applied, Interview, Offer, Rejected, Withdrawn),
   or null. Saved is never proposed.
 - scheduled_at: an interview date-time or an assessment deadline stated in the email, as ISO 8601
@@ -183,6 +188,19 @@ def title_grounded(title: str | None, mini: Minimized) -> bool:
     return hits >= max(1, -(-len(wanted) * 3 // 5))  # at least 60%, rounded up
 
 
+# Topic words (stems) for "an application / candidacy", across the supported languages. Used only as one extra,
+# conservative check on a verified excerpt for medium-confidence confirmations; never to classify on its own.
+APPLICATION_TERMS = (
+    'application', 'applied', 'candidacy', 'candidature', 'candidatura', 'candidat', 'bewerbung', 'beworben',
+    'aplikacj', 'aplikowa', 'zgłoszeni', 'kandydatur', 'solicitud', 'postulación', 'sollicitatie', 'başvuru',
+)
+
+
+def mentions_application(text: str | None) -> bool:
+    folded = fold(text)
+    return any(term in folded for term in APPLICATION_TERMS)
+
+
 def call_to_apply(*texts: str | None) -> bool:
     folded = ' '.join(fold(t) for t in texts if t)
     return any(p in folded for p in CALL_TO_APPLY)
@@ -230,6 +248,36 @@ def item_key(employer: str | None, title: str | None, event_type: str, refs: lis
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
 
 
+# Model placeholders that mean "no application matches"; anything else that cannot be resolved stays invalid.
+_NO_MATCH = {'', 'none', 'null', 'nil', 'n/a', 'na', 'no', '-', '--', 'no match', 'nomatch', 'unknown'}
+_KEY = re.compile(r'^a(\d{1,3})$')
+
+
+def resolve_key(raw: str | None, keys: dict[str, str]) -> tuple[str | None, bool]:
+    """(application id, invalid). A real shortlist key resolves; a no-match placeholder is simply no match; any
+    other value (an unknown A-key, a name, an id) appears to reference an application that cannot be validated."""
+    value = fold(raw or '')
+    if value in _NO_MATCH:
+        return None, False
+    m = _KEY.match(value)
+    if m and f'A{int(m.group(1))}' in keys:
+        return keys[f'A{int(m.group(1))}'], False
+    return None, True
+
+
+def signals(item: dict[str, Any]) -> dict[str, Any]:
+    """Minimal, non-sensitive decision signals (enums and booleans only) kept on reviews for diagnosis."""
+    return {
+        'kind': item['kind'], 'eventType': item['event_type'], 'evidence': item['evidence'],
+        'confidence': item['confidence'], 'quoteVerified': bool(item.get('quote_ok')),
+        'quoteStrong': bool(item.get('quote_strong')), 'employerGrounded': bool(item.get('employer_grounded')),
+        'titleGrounded': bool(item.get('title_grounded')), 'referenceVerified': bool(item.get('references')),
+        'invalidMatchKey': bool(item.get('alias_invalid')), 'callToApply': bool(item.get('call_to_apply')),
+        'quoteAboutApplication': bool(item.get('quote_application')),
+        'contradictions': bool(item.get('contradictions')),
+    }
+
+
 def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str, Any]], tz: str) -> dict[str, Any]:
     """Turn model output into frozen, backend-checked items (no body text; quotes only when verified)."""
     haystack = fold(f'{mini.subject}\n{mini.text}')
@@ -246,9 +294,12 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
         quote_ok = len(fold(quote)) >= 8 and fold(quote) in haystack
         refs = [r.strip()[:60] for r in raw.references if norm_ref(r) and len(norm_ref(r)) >= 3
                 and norm_ref(r) in ref_haystack]
-        match_id = keys.get(raw.match_key or '') if raw.match_key else None
-        alias_invalid = bool(raw.match_key) and match_id is None
-        candidates = [keys[k] for k in raw.candidate_keys if k in keys and keys[k] != match_id]
+        match_id, alias_invalid = resolve_key(raw.match_key, keys)
+        candidates = []
+        for k in raw.candidate_keys:
+            cid, _ = resolve_key(k, keys)  # unknown candidate keys are ignored (they never link anything)
+            if cid and cid != match_id and cid not in candidates:
+                candidates.append(cid)
         when, when_tz = parse_when(raw.scheduled_at, fallback_tz=tz, stated_tz=raw.timezone)
         before, _ = parse_when(raw.previous_scheduled_at, fallback_tz=tz, stated_tz=raw.timezone)
         employer = (raw.employer or '').strip() or None
@@ -264,6 +315,7 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
             'title_grounded': title_grounded(title, mini),
             'quote_strong': quote_ok and len(fold(quote)) >= 20,
             'call_to_apply': call_to_apply(quote, mini.subject),
+            'quote_application': quote_ok and mentions_application(quote),
             'mentioned_app_ids': mentioned,
             'key': key, 'kind': raw.kind, 'event_type': raw.event_type, 'employer': employer, 'job_title': title,
             'references': refs, 'quote': quote[:300] if quote_ok else None, 'quote_ok': quote_ok,

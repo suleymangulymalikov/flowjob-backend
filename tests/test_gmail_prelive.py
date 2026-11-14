@@ -248,7 +248,7 @@ def test_short_generic_quote_is_not_enough(world):
     email(w, 'SHORT', 'Thanks! Junior Data Analyst at Acme.',
           item(supporting_quote='Thanks! Junior'))
     sync_now(w)
-    assert apps(w) == [] and _reason(w) == 'uncertain'
+    assert apps(w) == [] and _reason(w) == 'weak_quote'
 
 
 def test_grounding_helpers():

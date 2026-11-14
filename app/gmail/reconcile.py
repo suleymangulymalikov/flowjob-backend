@@ -24,7 +24,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.applications.models import Application, ApplicationEvent, ApplicationStatus
-from app.gmail.classify import employer_similar, norm_name, norm_ref, title_similarity
+from app.gmail.classify import employer_similar, norm_name, norm_ref, signals, title_similarity
 from app.gmail.connection import as_utc, now, purge_if_disconnected
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview, GmailSuppression
 
@@ -210,14 +210,23 @@ def suppression_for(item: dict[str, Any], msg: GmailMessage, state: UserState) -
 
 
 def auto_import_ok(item: dict[str, Any]) -> tuple[bool, str]:
+    """Decide whether an unmatched item may create an application by itself. Returns (ok, reason).
+
+    Every reason names the first failed check, so a review says why it was not imported. Grounding and safety checks
+    apply at every confidence level; confidence is judged last.
+    """
     if item['kind'] not in ('submitted_application', 'existing_application_update'):
         return False, 'not_an_application'
     if not item['employer'] or not item['job_title']:
         return False, 'missing_details'
     if item['contradictions']:
         return False, 'contradictory'
-    if item['confidence'] != 'high' or not item.get('quote_strong') or item['alias_invalid']:
-        return False, 'uncertain'
+    if item['alias_invalid']:
+        return False, 'invalid_match'
+    if not item.get('quote_ok'):
+        return False, 'unverified_quote'
+    if not item.get('quote_strong'):
+        return False, 'weak_quote'
     # Grounding: the stated employer and position must come from the email, not only from the model.
     if not item.get('employer_grounded'):
         return False, 'ungrounded_employer'
@@ -225,12 +234,23 @@ def auto_import_ok(item: dict[str, Any]) -> tuple[bool, str]:
         return False, 'ungrounded_title'
     if item.get('call_to_apply'):
         return False, 'possible_advertisement'
-    evidence = item['evidence']
-    if evidence == 'confirmation' and item['event_type'] in ('application_confirmation', 'application_update'):
+    evidence, event = item['evidence'], item['event_type']
+    if item['confidence'] == 'low':
+        return False, 'low_confidence'
+    if item['confidence'] == 'medium':
+        # Only an explicit receipt/confirmation of a submitted application may import at medium confidence: the
+        # model must label it so consistently (kind, evidence and event), the job title itself must be grounded
+        # (a reference alone is not enough here) and the verified excerpt must itself be about an application.
+        # Inferred or contextual applications (interviews, rejections, references) still need high confidence.
+        explicit = (item['kind'] == 'submitted_application' and evidence == 'confirmation'
+                    and event == 'application_confirmation' and item.get('title_grounded')
+                    and item.get('quote_application'))
+        return (True, 'confirmation') if explicit else (False, 'medium_confidence')
+    if evidence == 'confirmation' and event in ('application_confirmation', 'application_update'):
         return True, 'confirmation'
     if evidence == 'reference' and item['references']:
         return True, 'reference'
-    if evidence in ('active_process', 'confirmation', 'reference') and item['event_type'] in INFERRING_EVENTS:
+    if evidence in ('active_process', 'confirmation', 'reference') and event in INFERRING_EVENTS:
         return True, 'active_process'
     return False, 'weak_evidence'
 
@@ -303,6 +323,7 @@ def application_proposal(conn: GmailConnection, msg: GmailMessage, item: dict[st
         'dateProvisional': item['event_type'] != 'application_confirmation',
         'eventType': item['event_type'], 'references': item['references'], 'reason': reason,
         'scheduledAt': item['scheduled_at'],
+        'signals': signals(item),  # enums/booleans only, for diagnosis; never email text or model output
     }
 
 
@@ -418,7 +439,7 @@ async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
             effects.reviews += 1
         return
     app = await import_application(conn, msg, item, provisional=reason != 'confirmation'
-                                   or item['event_type'] != 'application_confirmation')
+                                   or item['event_type'] != 'application_confirmation')  # date of a receipt
     state.apps.append(app)
     if msg.thread_id:
         state.thread_apps.setdefault(msg.thread_id, set()).add(str(app.id))

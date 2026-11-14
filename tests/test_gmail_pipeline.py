@@ -180,15 +180,15 @@ def test_uncertain_recruiter_email_goes_to_review(world):
     sync_now(w)
     assert apps(w) == []
     [r] = reviews(w)
-    assert r.kind == 'new_application' and r.proposal['reason'] == 'uncertain'
+    assert r.kind == 'new_application' and r.proposal['reason'] == 'medium_confidence'
 
 
 @pytest.mark.parametrize('change,reason', [
     ({'job_title': None}, 'missing_details'),
     ({'employer': None}, 'missing_details'),
     ({'contradictions': ['Subject says Analyst, body says Engineer']}, 'contradictory'),
-    ({'supporting_quote': 'A sentence the email never contained'}, 'uncertain'),
-    ({'confidence': 'low'}, 'uncertain'),
+    ({'supporting_quote': 'A sentence the email never contained'}, 'unverified_quote'),
+    ({'confidence': 'low'}, 'low_confidence'),
 ])
 def test_incomplete_or_unverified_items_go_to_review(world, change, reason):
     w = world
@@ -337,7 +337,7 @@ def test_model_cannot_pick_an_application_outside_the_shortlist(world):
           item(supporting_quote='Thank you for applying for Junior Data Analyst', match_key='A42'))
     sync_now(w)
     assert apps(w) == []
-    assert [r.proposal['reason'] for r in reviews(w)] == ['uncertain']
+    assert [r.proposal['reason'] for r in reviews(w)] == ['invalid_match']
 
 
 # --- status suggestions ----------------------------------------------------------------------------------------
