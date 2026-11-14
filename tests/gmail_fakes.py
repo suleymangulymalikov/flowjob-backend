@@ -10,6 +10,7 @@ import pytest
 
 from app.config import settings
 from app.gmail import google as google_module
+from app.gmail import sync as sync_module
 from app.gmail.google import (
     GMAIL_SCOPE, GoogleUnavailable, Identity, IdTokenInvalid, InvalidGrant, MessageGone, TokenResponse,
 )
@@ -139,6 +140,10 @@ def fake_google(monkeypatch):
     monkeypatch.setattr(settings, 'gmail_token_key', base64.b64encode(os.urandom(32)).decode())
     monkeypatch.setattr(settings, 'gmail_token_keys_old', '')
     monkeypatch.setattr(settings, 'frontend_base_url', 'http://localhost:5173')
+
+    async def inline(coro):
+        await coro
+    monkeypatch.setattr(sync_module, 'spawn', inline)
     return fake
 
 

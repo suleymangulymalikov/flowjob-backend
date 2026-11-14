@@ -3,6 +3,7 @@ bound to its user by the single-use state and to its browser by the HttpOnly coo
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.auth.dependencies import get_current_user
 from app.config import settings
-from app.gmail import oauth
+from app.gmail import oauth, sync
 from app.gmail.connection import as_utc, connection_for, disconnect, now
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview
 from app.integration.router import secure_cookie
@@ -133,6 +134,8 @@ async def oauth_callback(
             _log.exception('Gmail OAuth callback failed.')
             target = _frontend({'gmail': 'error', 'reason': 'exchange_failed'})
         else:
+            # Initial 30-day backfill (or resumption after a reconnect) starts right away in the background.
+            await sync.launch_sync(result.connection.id, trigger=result.outcome)
             target = _frontend({'gmail': result.outcome})
     redirect = RedirectResponse(target, status_code=303)
     redirect.delete_cookie(oauth.COOKIE, path=oauth.COOKIE_PATH, httponly=True,
@@ -140,6 +143,38 @@ async def oauth_callback(
     redirect.headers['Cache-Control'] = 'no-store'
     redirect.headers['Referrer-Policy'] = 'no-referrer'
     return redirect
+
+
+class SyncInput(BaseModel):
+    retryFailed: bool = False  # noqa: N815
+
+
+@router.post('/gmail/sync', status_code=202)
+async def start_sync(user: CurrentUser, data: SyncInput | None = None):
+    """Sync now, or Retry sync (requeues failed messages). Runs in the background; poll GET /gmail."""
+    conn = await connection_for(user.id)
+    if conn is None:
+        raise HTTPException(404, 'Gmail is not connected.')
+    if conn.status == 'reauth_required':
+        raise HTTPException(409, 'Google access expired. Reconnect Gmail to continue.')
+    interval = timedelta(seconds=settings.gmail_manual_sync_min_interval_seconds)
+    t = now()
+    claimed = await GmailConnection.get_pymongo_collection().update_one(
+        {'_id': conn.id, 'status': 'active',
+         '$or': [{'last_manual_sync_at': None}, {'last_manual_sync_at': {'$lte': t - interval}}]},
+        {'$set': {'last_manual_sync_at': t}},
+    )
+    if claimed.modified_count != 1:
+        wait = int(interval.total_seconds())
+        raise HTTPException(429, 'A sync was started moments ago. Try again shortly.',
+                            headers={'Retry-After': str(wait)})
+    started = await sync.launch_sync(conn.id, trigger='manual', retry_failed=bool(data and data.retryFailed))
+    if not started:
+        # Give the rate-limit slot back: nothing was started.
+        await GmailConnection.get_pymongo_collection().update_one(
+            {'_id': conn.id, 'last_manual_sync_at': t}, {'$set': {'last_manual_sync_at': None}})
+        raise HTTPException(409, 'A Gmail sync is already running.')
+    return await gmail_status(user)
 
 
 @router.delete('/gmail', status_code=204)

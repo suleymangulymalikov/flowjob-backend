@@ -18,8 +18,16 @@ from app.users.router import router as users_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    yield
-    await client.close()
+    from app.config import settings
+    from app.gmail.scheduler import scheduler
+    if settings.gmail_scheduler_enabled:
+        scheduler.start()
+    try:
+        yield
+    finally:
+        if settings.gmail_scheduler_enabled:
+            await scheduler.stop()
+        await client.close()
 
 
 app = FastAPI(title="FlowJob API", lifespan=lifespan)

@@ -87,7 +87,7 @@ async def renew_lock(conn_id: PydanticObjectId, owner: str) -> bool:
         {'_id': conn_id, 'status': 'active', 'lock_owner': owner, 'lock_expires_at': {'$gt': t}},
         {'$set': {'lock_expires_at': t + timedelta(seconds=settings.gmail_lock_ttl_seconds)}},
     )
-    return result.modified_count == 1
+    return result.matched_count == 1  # an identical millisecond renewal is still a successful match
 
 
 async def release_lock(conn_id: PydanticObjectId, owner: str) -> None:
