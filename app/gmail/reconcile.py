@@ -24,7 +24,9 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.applications.models import Application, ApplicationEvent, ApplicationStatus
-from app.gmail.classify import employer_similar, norm_name, norm_ref, signals, title_similarity
+from app.gmail.classify import (
+    RECOVERABLE_EVENTS, employer_similar, norm_name, norm_ref, signals, title_similarity,
+)
 from app.gmail.connection import as_utc, now, purge_if_disconnected
 from app.gmail.models import GmailConnection, GmailMessage, GmailReview, GmailSuppression
 
@@ -48,6 +50,7 @@ class Effects:
     activities: int = 0
     reviews: int = 0
     notes: list[str] = field(default_factory=list)
+    decisions: list[dict[str, Any]] = field(default_factory=list)  # sanitized enums per item, for the ledger
 
 
 def status_value(app: Application) -> str:
@@ -393,10 +396,28 @@ async def schedule_plan(app: Application, msg: GmailMessage, item: dict[str, Any
     return (when, item['scheduled_tz'], previous), None
 
 
+def recovery_block(item: dict[str, Any]) -> str | None:
+    """Why an item with inconsistent labels cannot be recovered (None = eligible to try linking)."""
+    if item['event_type'] not in RECOVERABLE_EVENTS:
+        return 'unsupported_event'
+    if item['contradictions']:
+        return 'contradictory'
+    if item['alias_invalid']:
+        return 'invalid_match'
+    if not item.get('quote_strong'):
+        return 'weak_quote'
+    if item.get('call_to_apply'):
+        return 'advertisement_wording'
+    if not item.get('quote_event'):
+        return 'event_not_supported_by_quote'
+    return None
+
+
 async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, Any], state: UserState,
-                     effects: Effects) -> None:
-    if item['kind'] in NON_APPLICATION_KINDS:
-        return
+                     effects: Effects, *, is_recruitment: bool = True) -> tuple[str, str | None]:
+    """Apply one frozen item. Returns (action, reason) as enums for the sanitized ledger decision."""
+    if not is_recruitment or item['kind'] in NON_APPLICATION_KINDS:
+        return await recover_item(conn, msg, item, state, effects, is_recruitment=is_recruitment)
     suppressed, sup = suppression_for(item, msg, state)
     res = resolve(item, msg, state)
 
@@ -404,7 +425,7 @@ async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
         proposal = application_proposal(conn, msg, item, 'ambiguous_match')
         if await add_review(conn, msg, item, 'ambiguous_link', candidates=res.candidates, proposal=proposal):
             effects.reviews += 1
-        return
+        return 'review', 'ambiguous_match'
 
     if res.kind == 'linked':
         app = res.app
@@ -412,24 +433,14 @@ async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
             proposal = application_proposal(conn, msg, item, 'possible_reapplication')
             if await add_review(conn, msg, item, 'new_application', candidates=[app], proposal=proposal):
                 effects.reviews += 1
-            return
-        plan, review_previous = await schedule_plan(app, msg, item)
-        event = await upsert_event(conn, msg, item, app.id, scheduled=plan)
-        effects.activities += 1
-        effects.linked += 1
-        if review_previous is not None:
-            proposal = {'scheduledAt': item['scheduled_at'], 'scheduledTz': item['scheduled_tz'],
-                        'previousScheduledAt': review_previous or None, 'eventType': item['event_type']}
-            if await add_review(conn, msg, item, 'schedule_change', application_id=app.id,
-                                source_event_id=event.id, proposal=proposal):
-                effects.reviews += 1
-        await propose_status(conn, msg, item, app, event, effects)
-        return
+            return 'review', 'possible_reapplication'
+        await link_event(conn, msg, item, app, effects)
+        return 'linked', res.via
 
     # No existing application.
     if suppressed == 'same':
         effects.notes.append('suppressed')
-        return  # evidence of an application the user deleted: never recreate it
+        return 'suppressed', 'deleted_application'  # evidence of an application the user deleted: never recreate
     ok, reason = auto_import_ok(item)
     if suppressed == 'similar':
         ok, reason = False, 'previously_deleted'
@@ -437,7 +448,7 @@ async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
         proposal = application_proposal(conn, msg, item, reason)
         if await add_review(conn, msg, item, 'new_application', proposal=proposal):
             effects.reviews += 1
-        return
+        return 'review', reason
     app = await import_application(conn, msg, item, provisional=reason != 'confirmation'
                                    or item['event_type'] != 'application_confirmation')  # date of a receipt
     state.apps.append(app)
@@ -448,6 +459,50 @@ async def apply_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, A
     event = await upsert_event(conn, msg, item, app.id)
     effects.activities += 1
     await propose_status(conn, msg, item, app, event, effects)
+    return 'imported', reason
+
+
+async def link_event(conn: GmailConnection, msg: GmailMessage, item: dict[str, Any], app: Application,
+                     effects: Effects) -> None:
+    """Record activity on an existing application; status changes only ever become pending suggestions."""
+    plan, review_previous = await schedule_plan(app, msg, item)
+    event = await upsert_event(conn, msg, item, app.id, scheduled=plan)
+    effects.activities += 1
+    effects.linked += 1
+    if review_previous is not None:
+        proposal = {'scheduledAt': item['scheduled_at'], 'scheduledTz': item['scheduled_tz'],
+                    'previousScheduledAt': review_previous or None, 'eventType': item['event_type']}
+        if await add_review(conn, msg, item, 'schedule_change', application_id=app.id,
+                            source_event_id=event.id, proposal=proposal):
+            effects.reviews += 1
+    await propose_status(conn, msg, item, app, event, effects)
+
+
+async def recover_item(conn: GmailConnection, msg: GmailMessage, item: dict[str, Any], state: UserState,
+                       effects: Effects, *, is_recruitment: bool) -> tuple[str, str | None]:
+    """Safety net for inconsistent model labels (a non-application kind, or "not recruitment") on what looks like
+    a recruitment event for an EXISTING application. It never creates an application and never changes a status:
+    with a supported event type, a strong verbatim excerpt that itself supports that event, no blocking signal and
+    a deterministic match (reference within a compatible employer, the same thread with corroborating identity,
+    or a unique exact employer and title) it records the activity and, at most, a pending status suggestion.
+    """
+    ignored = 'ignored_not_recruitment' if not is_recruitment else 'ignored_non_application'
+    if item['event_type'] not in RECOVERABLE_EVENTS:
+        return ignored, None  # ordinary non-application mail (ads, newsletters, other): nothing to recover
+    block = recovery_block(item)
+    if block:
+        return 'not_recovered', block
+    res = resolve(item, msg, state)
+    if res.kind == 'ambiguous':
+        return 'not_recovered', 'ambiguous_match'
+    if res.kind != 'linked':
+        return 'not_recovered', 'no_verified_match'
+    if res.via == 'model':
+        return 'not_recovered', 'model_only_match'
+    if res.via == 'thread' and not (item['employer'] or item['job_title']):
+        return 'not_recovered', 'thread_without_identity'
+    await link_event(conn, msg, item, res.app, effects)
+    return 'recovered_linked', res.via
 
 
 async def import_application(conn: GmailConnection, msg: GmailMessage, item: dict[str, Any], *,
@@ -473,9 +528,14 @@ async def import_application(conn: GmailConnection, msg: GmailMessage, item: dic
 async def apply_analysis(conn: GmailConnection, msg: GmailMessage, analysis: dict[str, Any], fence) -> Effects:
     effects = Effects()
     state = await load_state(conn)
+    is_recruitment = analysis.get('is_recruitment', True)
     for item in analysis.get('items') or []:
         await fence()
-        await apply_item(conn, msg, item, state, effects)
+        action, reason = await apply_item(conn, msg, item, state, effects, is_recruitment=is_recruitment)
+        effects.decisions.append({
+            'kind': item['kind'], 'eventType': item['event_type'], 'confidence': item['confidence'],
+            'evidence': item['evidence'], 'action': action, 'reason': reason,
+        })
     return effects
 
 

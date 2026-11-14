@@ -92,6 +92,9 @@ class GmailMessage(Document):
     # snapshot, so a retry after a crash never re-asks the model and cannot reorder or duplicate items.
     analysis: dict[str, Any] | None = None
     prompt_version: str | None = None
+    # Sanitized outcome of processing: recruitment flag, item count and per-item kind/event/confidence/evidence/
+    # action/reason enums. Absent on rows processed before this field existed.
+    decision: dict[str, Any] | None = None
     updated_at: datetime = Field(default_factory=_now)
 
     class Settings:

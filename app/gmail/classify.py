@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.gmail.preprocess import Minimized
 
-GMAIL_PROMPT_VERSION = 'gmail-2'
+GMAIL_PROMPT_VERSION = 'gmail-3'
 
 EventType = Literal[
     'application_confirmation', 'application_update', 'assessment', 'recruiter_follow_up', 'interview_invitation',
@@ -65,9 +65,15 @@ Return one item per distinct position the email is about (most emails have zero 
   * submitted_application — the email shows the user ALREADY applied to this position: a confirmation of receipt,
     a reference/requisition number of the user's application, or an active recruitment step for this user
     (assessment, interview, offer, rejection of their application).
-  * existing_application_update — news about an application the user already made (status, schedule, follow-up).
-  * job_advertisement, invitation_to_apply (incl. "we think you'd be a great fit, apply here"), newsletter
-    (job alerts, digests, recommendations), other — these never prove an application.
+  * existing_application_update — a development in an application the user ALREADY submitted: an invitation to
+    an interview or an assessment, a rescheduled interview, a changed deadline, an offer, a rejection or another
+    follow-up. These are recruitment events even though the user is not submitting anything new. An interview
+    invitation is existing_application_update with event_type interview_invitation.
+  * invitation_to_apply — the sender asks the user to SUBMIT an application they have not made yet (e.g. "we
+    think you'd be a great fit, apply here"). An invitation to an INTERVIEW or assessment is never
+    invitation_to_apply.
+  * job_advertisement, invitation_to_apply, newsletter (job alerts, digests, recommendations), other — these
+    never prove an application.
 - event_type: what this email is, in English categories. Use application_update for a generic status update.
 - employer and job_title: copy the official names as written in the email, in the original language. Use null
   when the email does not identify them. Never guess from the sender alone if the email names a different company.
@@ -93,8 +99,9 @@ Return one item per distinct position the email is about (most emails have zero 
   schedule_change: clear (the email clearly confirms a new date-time), ambiguous (proposes options, asks the user
   to pick, or is unclear), none. timezone: the time zone stated in the email (IANA name or offset) or null.
 
-The email may be in any language (English, Polish, German, ...). Set is_recruitment=false and return no items for
-email unrelated to the user's own job applications or job search.
+The email may be in any language (English, Polish, German, ...). Set is_recruitment=true for any email about the
+user's own applications or recruitment processes, including interview and assessment invitations. Set
+is_recruitment=false and return no items only for email unrelated to the user's own job applications or job search.
 """
 
 
@@ -201,6 +208,30 @@ def mentions_application(text: str | None) -> bool:
     return any(term in folded for term in APPLICATION_TERMS)
 
 
+# Topic stems that show a verified excerpt is actually about a given recruitment event (several languages). Used
+# only to corroborate the model's event label in the recovery path; never to classify an email on its own.
+EVENT_TERMS: dict[str, tuple[str, ...]] = {
+    'interview_invitation': ('interview', 'rozmow', 'spotkani', 'gespräch', 'vorstellungs', 'entretien',
+                             'entrevista', 'colloquio', 'mülakat', 'gesprek', 'video call', 'call with'),
+    'interview_rescheduled': ('resched', 'move your interview', 'new time', 'new date', 'przełoż', 'przesun',
+                              'nowy termin', 'verschieb', 'neuer termin', 'nouvelle date', 'reprogram',
+                              'interview', 'rozmow', 'gespräch'),
+    'assessment': ('assessment', 'test', 'task', 'challenge', 'exercise', 'zadani', 'aufgabe', 'evaluat',
+                   'kodowani', 'coding'),
+    'deadline_extension': ('deadline', 'extend', 'extension', 'termin', 'frist', 'verlänger', 'przedłuż',
+                           'prolong', 'plazo'),
+    'offer': ('offer', 'ofert', 'angebot', 'offre', 'oferta', 'contract', 'umow', 'vertrag'),
+    'rejection': ('unfortunately', 'regret', 'not moving forward', 'not to proceed', 'other candidates',
+                  'niestety', 'leider', 'absage', 'malheureusement', 'lamentablemente', 'purtroppo', 'helaas'),
+}
+RECOVERABLE_EVENTS = frozenset(EVENT_TERMS)
+
+
+def quote_supports_event(quote: str | None, event_type: str) -> bool:
+    folded = fold(quote)
+    return any(term in folded for term in EVENT_TERMS.get(event_type, ()))
+
+
 def call_to_apply(*texts: str | None) -> bool:
     folded = ' '.join(fold(t) for t in texts if t)
     return any(p in folded for p in CALL_TO_APPLY)
@@ -285,8 +316,8 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
     keys = {a['key']: a['application_id'] for a in shortlist}
     items: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
-    if not analysis.is_recruitment:
-        return {'items': [], 'is_recruitment': False}
+    # Items are kept even when the model says "not recruitment": the backend only lets such items through the
+    # conservative recovery path (linking to an existing application), never the import path.
     # Shortlisted applications whose employer the email itself names (independent of the model's choice).
     mentioned = [a['application_id'] for a in shortlist if employer_grounded(a['company'], mini)]
     for raw in analysis.items[:5]:
@@ -316,6 +347,7 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
             'quote_strong': quote_ok and len(fold(quote)) >= 20,
             'call_to_apply': call_to_apply(quote, mini.subject),
             'quote_application': quote_ok and mentions_application(quote),
+            'quote_event': quote_ok and quote_supports_event(quote, raw.event_type),
             'mentioned_app_ids': mentioned,
             'key': key, 'kind': raw.kind, 'event_type': raw.event_type, 'employer': employer, 'job_title': title,
             'references': refs, 'quote': quote[:300] if quote_ok else None, 'quote_ok': quote_ok,
@@ -327,4 +359,4 @@ def validate(analysis: EmailAnalysis, mini: Minimized, shortlist: list[dict[str,
             'previous_scheduled_at': before.isoformat() if before else None,
             'schedule_change': raw.schedule_change,
         })
-    return {'items': items, 'is_recruitment': True}
+    return {'items': items, 'is_recruitment': analysis.is_recruitment}

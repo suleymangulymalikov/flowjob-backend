@@ -254,5 +254,5 @@ def test_resolve_key_unit():
 
 
 def test_prompt_is_versioned_and_asks_for_null_and_calibrated_confidence():
-    assert GMAIL_PROMPT_VERSION == 'gmail-2'
+    assert GMAIL_PROMPT_VERSION == 'gmail-3'
     assert 'return null (JSON' in SYSTEM_PROMPT and 'is\n  normally high' in SYSTEM_PROMPT

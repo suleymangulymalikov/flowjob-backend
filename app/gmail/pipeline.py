@@ -70,6 +70,16 @@ async def process_message(ctx: SyncContext, msg: GmailMessage) -> str:
             {'$set': {'analysis': analysis, 'prompt_version': classify.GMAIL_PROMPT_VERSION}})
         msg.analysis = analysis
     effects = await reconcile.apply_analysis(ctx.connection, msg, analysis, ctx.fence)
+    # Sanitized decision record: enums, booleans and counts only (no email text, no model output).
+    decision = {
+        'isRecruitment': bool(analysis.get('is_recruitment', True)),
+        'itemCount': len(analysis.get('items') or []),
+        'items': effects.decisions[:5],
+        'promptVersion': classify.GMAIL_PROMPT_VERSION,
+    }
+    await ctx.fence()
+    await GmailMessage.get_pymongo_collection().update_one(
+        {'_id': msg.id, 'claim': ctx.owner}, {'$set': {'decision': decision}})
     s = ctx.summary
     s.imported += effects.imported
     s.linked += effects.linked

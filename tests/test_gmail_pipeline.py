@@ -595,7 +595,9 @@ def test_model_output_validation():
     [i] = out['items']
     assert i['references'] == ['ABC-123'] and i['scheduled_at'] is None
     assert i['alias_invalid'] is True and i['match_id'] is None and i['quote_ok'] is True
-    assert validate(EmailAnalysis(is_recruitment=False, items=[item()]), mini, [], 'UTC')['items'] == []
+    # "Not recruitment" items are kept but flagged; only the conservative recovery path may use them.
+    flagged = validate(EmailAnalysis(is_recruitment=False, items=[item()]), mini, [], 'UTC')
+    assert flagged['is_recruitment'] is False and len(flagged['items']) == 1
     with pytest.raises(Exception):
         EmailAnalysis(is_recruitment=True, items=[item()] * 6)
 
