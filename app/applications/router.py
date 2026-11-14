@@ -83,11 +83,15 @@ async def present_many(apps: list[Application], user: User) -> list[dict[str, An
         item = present(a)
         mine = events.get(str(a.id), [])
         item['suggestion'] = suggestions.get(str(a.id))
-        item['history'] = [
-            {'id': str(e.id), 'status': e.status_to, 'at': _utc_iso(e.occurred_at),
-             'source': 'manual' if e.source == 'manual' else 'gmail_confirmed'}
-            for e in mine if e.event_type == 'status_change' and e.status_to
-        ]
+        changes = [e for e in mine if e.event_type == 'status_change' and e.status_to]
+        if changes:
+            # Oldest first: the status the application was added with, then each manual or approved change.
+            item['history'] = [{'id': 'created', 'status': changes[0].status_from or item['status'],
+                                'at': _utc_iso(a.created_at), 'source': 'manual'}] + [
+                {'id': str(e.id), 'status': e.status_to, 'at': _utc_iso(e.occurred_at),
+                 'source': 'manual' if e.source == 'manual' else 'gmail_confirmed'}
+                for e in changes
+            ]
         item['activity'] = [present_event(e, conn) for e in mine if e.source == 'gmail' and e.state == 'active']
         out.append(item)
     return out
