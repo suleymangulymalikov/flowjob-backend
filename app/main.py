@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,15 +11,31 @@ from app.auth.router import router as auth_router
 from app.cv.router import router as cv_router
 from app.integration.router import router as ui_router
 from app.db import client, init_db
+from app.gmail.router import router as gmail_router
 from app.profiles.router import router as profiles_router
 from app.users.router import router as users_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.gmail.oauth import install_log_redaction
+    install_log_redaction()  # OAuth codes/state never appear in uvicorn access logs
     await init_db()
-    yield
-    await client.close()
+    from app.config import settings
+    from app.gmail.scheduler import scheduler
+    if settings.gmail_scheduler_enabled:
+        scheduler.start()
+    from app.gmail import crypto, sync
+    if settings.gmail_configured and crypto.key_problem():
+        # Never log the key itself; Gmail stays unavailable until the configuration is fixed.
+        logging.getLogger('app.gmail').error('Gmail is disabled: %s', crypto.key_problem())
+    try:
+        yield
+    finally:
+        if settings.gmail_scheduler_enabled:
+            await scheduler.stop()
+        await sync.shutdown()  # cancel in-flight manual syncs before the database client closes
+        await client.close()
 
 
 app = FastAPI(title="FlowJob API", lifespan=lifespan)
@@ -31,6 +48,7 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(profiles_router)
 app.include_router(cv_router)
+app.include_router(gmail_router)
 
 
 @app.get("/health")

@@ -23,12 +23,15 @@ def pytest_sessionstart(session):
         mongo = resources.enter_context(start_mongod(executable))
         env = resources.enter_context(pytest.MonkeyPatch.context())
         for key in list(os.environ):
-            if key.upper() in {"OPENAI_API_KEY", "JWT_SECRET"}:
+            upper = key.upper()
+            if upper in {"OPENAI_API_KEY", "JWT_SECRET", "FRONTEND_BASE_URL"} or upper.startswith(("GOOGLE_", "GMAIL_")):
                 env.delenv(key)
         env.setenv("MONGODB_URI", mongo.uri)
         env.setenv("MONGODB_DB_NAME", mongo.database)
         env.setenv("OPENAI_API_KEY", "mock")
         env.setenv("JWT_SECRET", token_hex(32))
+        # Gmail stays unconfigured and the scheduler off unless a test opts in explicitly.
+        env.setenv("GMAIL_SCHEDULER_ENABLED", "false")
 
         # Settings loads .env relative to the working directory at import time.
         # Load it from the empty test directory, then restore the project cwd.

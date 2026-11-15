@@ -7,7 +7,7 @@ from beanie.odm.queries.update import UpdateResponse
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.applications.models import Application, ApplicationStatus
+from app.applications.models import Application, ApplicationEvent, ApplicationStatus
 from app.applications.schemas import ApplicationCreate, ApplicationUpdate
 from app.auth.dependencies import get_current_user
 from app.integration.models import SavedCv
@@ -33,10 +33,76 @@ def present(a: Application) -> dict[str, Any]:
         'followUpDate': a.follow_up_date.isoformat() if a.follow_up_date else None,
         'createdAt': a.created_at.isoformat(),
         'updatedAt': a.updated_at.isoformat(),
-        # Gmail/timeline features are not implemented yet; the UI expects these keys.
+        'source': a.source,
+        'importedAt': a.imported_at.isoformat() if a.imported_at else None,
+        'dateAppliedProvisional': a.date_applied_provisional,
+        # Filled by present_many/present_full from the status history and the pending Gmail suggestion.
         'history': [],
+        'activity': [],
         'suggestion': None,
     }
+
+
+async def _suggestions(apps: list[Application], user: User) -> dict[str, dict[str, Any]]:
+    from app.gmail.connection import connection_for
+    from app.gmail.models import GmailReview
+    from app.gmail.reviews import gmail_url
+    ids = [a.suggestion_review_id for a in apps if a.suggestion_review_id]
+    if not ids:
+        return {}
+    conn = await connection_for(user.id)
+    rows = await GmailReview.find(GmailReview.user_id == user.id, GmailReview.state == 'pending',
+                                  {'_id': {'$in': ids}}, ignore_cache=True).to_list()
+    out = {}
+    for r in rows:
+        out[str(r.application_id)] = {
+            'id': str(r.id), 'proposedStatus': r.proposal.get('to'), 'currentStatus': r.proposal.get('from'),
+            'eventType': r.proposal.get('eventType'), 'excerpt': r.excerpt,
+            'receivedAt': (r.internal_at if r.internal_at.tzinfo else r.internal_at.replace(tzinfo=UTC)).isoformat(),
+            'gmailUrl': gmail_url(conn, r.connection_id, r.message_id),
+        }
+    return out
+
+
+async def present_many(apps: list[Application], user: User) -> list[dict[str, Any]]:
+    """List and detail share one shape: status history, Gmail recruitment activity and the pending suggestion,
+    loaded with one events query for all listed applications."""
+    from app.gmail.connection import connection_for
+    from app.gmail.reviews import present_event
+    if not apps:
+        return []
+    suggestions = await _suggestions(apps, user)
+    conn = await connection_for(user.id)
+    events: dict[str, list[ApplicationEvent]] = {}
+    for e in await ApplicationEvent.find(ApplicationEvent.user_id == user.id,
+                                         {'application_id': {'$in': [a.id for a in apps]}},
+                                         ignore_cache=True).sort('occurred_at').to_list():
+        events.setdefault(str(e.application_id), []).append(e)
+    out = []
+    for a in apps:
+        item = present(a)
+        mine = events.get(str(a.id), [])
+        item['suggestion'] = suggestions.get(str(a.id))
+        changes = [e for e in mine if e.event_type == 'status_change' and e.status_to]
+        if changes:
+            # Oldest first: the status the application was added with, then each manual or approved change.
+            item['history'] = [{'id': 'created', 'status': changes[0].status_from or item['status'],
+                                'at': _utc_iso(a.created_at), 'source': 'manual'}] + [
+                {'id': str(e.id), 'status': e.status_to, 'at': _utc_iso(e.occurred_at),
+                 'source': 'manual' if e.source == 'manual' else 'gmail_confirmed'}
+                for e in changes
+            ]
+        item['activity'] = [present_event(e, conn) for e in mine if e.source == 'gmail' and e.state == 'active']
+        out.append(item)
+    return out
+
+
+def _utc_iso(value: datetime) -> str:
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
+
+
+async def present_full(a: Application, user: User) -> dict[str, Any]:
+    return (await present_many([a], user))[0]
 
 
 def _oid(value: str) -> PydanticObjectId:
@@ -84,7 +150,7 @@ async def create_application(data: ApplicationCreate, user: CurrentUser):
         follow_up_date=data.followUpDate,
     )
     await app.insert()
-    return present(app)
+    return await present_full(app, user)
 
 
 _SORT_FIELDS = {
@@ -124,12 +190,12 @@ async def list_applications(
     ranked = sorted((a for a in docs if value(a) is not None), key=value, reverse=(order == 'desc'))
     missing = [a for a in docs if value(a) is None]
     docs = ranked + missing
-    return [present(a) for a in docs[offset : offset + limit]]
+    return await present_many(docs[offset : offset + limit], user)
 
 
 @router.get('/applications/{app_id}')
 async def get_application(app_id: str, user: CurrentUser):
-    return present(await owned(app_id, user))
+    return await present_full(await owned(app_id, user), user)
 
 
 _FIELD_MAP = {
@@ -152,20 +218,35 @@ async def update_application(app_id: str, data: ApplicationUpdate, user: Current
     app = await owned(app_id, user)
     fields = data.model_dump(exclude_unset=True)
     if not fields:
-        return present(app)
+        return await present_full(app, user)
     if 'cvId' in fields:
         fields['cvId'] = await resolve_cv(fields['cvId'], user)
     changes = {_FIELD_MAP[key]: value for key, value in fields.items()}
-    changes['updated_at'] = datetime.now(UTC)
+    t = datetime.now(UTC)
+    changes['updated_at'] = t
+    if 'dateApplied' in fields:
+        changes['date_applied_provisional'] = False  # the user set the date: no longer provisional
+    status_changed = 'status' in fields and fields['status'] != app.status
+    if status_changed:
+        # A manual decision: older Gmail emails can no longer suggest a status for this application.
+        changes['status_basis_at'] = t
     # Write only the supplied fields so history and simultaneous unrelated edits survive.
     updated = await Application.find_one(
         Application.id == app.id, Application.user_id == user.id, ignore_cache=True,
     ).update({'$set': changes}, response_type=UpdateResponse.NEW_DOCUMENT)
     if updated is None:
         raise HTTPException(404, 'Application not found')
-    return present(updated)
+    if status_changed:
+        from app.gmail.reconcile import invalidate_status_suggestion
+        await ApplicationEvent(user_id=user.id, application_id=updated.id, source='manual', event_type='status_change',
+                               occurred_at=t, status_from=app.status.value, status_to=updated.status.value).insert()
+        await invalidate_status_suggestion(updated)
+    return await present_full(updated, user)
 
 
 @router.delete('/applications/{app_id}', status_code=204)
 async def delete_application(app_id: str, user: CurrentUser):
-    await (await owned(app_id, user)).delete()
+    from app.gmail.reconcile import on_application_deleted
+    app = await owned(app_id, user)
+    await on_application_deleted(app)  # remembers Gmail evidence while connected, drops activity and reviews
+    await app.delete()

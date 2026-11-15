@@ -54,6 +54,7 @@ def test_cv_crud_and_user_isolation(client):
 
 def test_missing_features_are_not_mocked(client):
     headers = signup(client)
-    # Gmail sync and AI CV tailoring remain unimplemented (applications and job matching are real).
-    assert client.get(f'{BASE}/gmail', headers=headers).status_code == 404
+    # Gmail is real but reports itself unavailable until Google OAuth is configured; nothing is faked.
+    gmail = client.get(f'{BASE}/gmail', headers=headers).json()
+    assert gmail['available'] is False and gmail['connection'] == {'state': 'not_connected'}
     assert client.post(f'{BASE}/tailor', headers=headers, json={'matchId': 'x'}).status_code == 404
