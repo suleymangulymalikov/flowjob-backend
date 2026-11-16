@@ -195,7 +195,9 @@ a `VITE_*` variable, which is public).
   in front must do the same (for example, a dedicated nginx `location` for that path with `access_log off;` or a log
   format without `$args`). The callback answers with `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
   FlowJob's own Gmail logs contain error categories and exception type names only, never tokens, addresses, ids or
-  email text.
+  email text. A failed OpenAI request (any feature) logs only the model, the exception type, the HTTP status and
+  OpenAI's own error code, error type and request id, never the provider's message, the prompt, CV, job or email
+  text, or the model's output.
 
 ### Scheduler, retries and recovery
 
