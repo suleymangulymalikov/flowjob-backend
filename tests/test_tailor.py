@@ -115,7 +115,7 @@ def test_successful_tailoring(client, mock_ai):
     assert [(s['op'], s['risk'], s['reviewRequired']) for s in d['suggestions']] == [
         ('rewrite', 'review', True), ('rewrite', 'review', True), ('reorder', 'auto', False)]
     assert d['suggestions'][2]['suggested'] == 'MongoDB, Python' and d['suggestions'][2]['original'] == 'Python, MongoDB'
-    assert d['proposalStats'] == {'proposed': 3, 'kept': 3, 'rejected': {}}
+    assert d['proposalStats'] == {'proposed': 3, 'kept': 3, 'rejected': {}, 'rejectedExamples': []}
     assert d['sourceCvRevision'] == client.get(f'{BASE}/cvs/{cv}', headers=h).json()['contentRevision']
 
 
@@ -138,7 +138,7 @@ def test_invalid_proposals_are_counted_and_valid_changes_survive(client, monkeyp
         rewrite('projects.absent.description', 'x'),                            # unknown_target
         rewrite('education.0.degree', 'x'),                                     # unknown_path
         rewrite('skills', 'Python, Rust'),                                      # rewrite_target_not_text
-        ProposedChange(op='reorder', path='skills', order_skills=['Python'], reason='x'),                  # bad_permutation
+        ProposedChange(op='reorder', path='skills', order_skills=['Rust'], reason='x'),                    # bad_permutation (names no real skill)
         ProposedChange(op='reorder', path='skills', order_skills=['Python', 'MongoDB'], reason='x'),       # no_change
         ProposedChange(op='reorder', path='experience.0', order_bullets=[0, 0], reason='x'),               # a single bullet cannot be reordered
         ProposedChange(op='delete', path='experience.0.bullets.9', reason='x'),                            # unknown_target
@@ -179,8 +179,12 @@ def test_the_model_cannot_make_a_rewrite_automatic_only_verified_reorders_are(cl
         rewrite('experience.0.bullets.0', 'Built 300 REST APIs with Python and MongoDB'),
         ProposedChange(op='reorder', path='skills', order_skills=['mongodb', 'PYTHON'], reason='Order.'),
     ])
-    assert [(s['op'], s['risk']) for s in d['suggestions']] == [('rewrite', 'review'), ('rewrite', 'review'), ('reorder', 'auto')]
-    assert d['suggestions'][2]['suggested'] == 'MongoDB, Python'   # original spelling restored
+    # The invented figure (300) is refused outright; the unverifiable claim still needs the user's approval.
+    assert [(s['op'], s['risk']) for s in d['suggestions']] == [('rewrite', 'review'), ('reorder', 'auto')]
+    assert d['proposalStats']['rejected'] == {'adds_number': 1}
+    assert d['proposalStats']['rejectedExamples'] == [
+        {'op': 'rewrite', 'path': 'experience.0.bullets.0', 'reason': 'adds_number'}]
+    assert d['suggestions'][1]['suggested'] == 'MongoDB, Python'   # original spelling restored
 
 
 def test_bullet_reorder_must_be_an_exact_permutation_and_is_auto(client, monkeypatch):
@@ -190,11 +194,27 @@ def test_bullet_reorder_must_be_an_exact_permutation_and_is_auto(client, monkeyp
                'projects': [], 'skills': ['Python']}
     d = _tailor_with(client, monkeypatch, [
         ProposedChange(op='reorder', path='experience.0', order_bullets=[2, 0, 1], reason='Most relevant first.'),
-        ProposedChange(op='reorder', path='experience.0', order_bullets=[2, 2, 1], reason='bad'),
+        ProposedChange(op='reorder', path='experience.0', order_bullets=[7, 9], reason='names no real bullet'),
     ], content)
     (only,) = d['suggestions']
     assert only['order'] == [2, 0, 1] and only['risk'] == 'auto' and only['experienceId'] == '0' and 'bulletIndex' not in only
     assert d['proposalStats']['rejected'] == {'bad_permutation': 1}
+
+
+def test_an_incomplete_reorder_is_repaired_into_a_true_permutation_never_adding_or_losing_anything(client, monkeypatch):
+    content = {'fullName': 'Ana', 'summary': SUMMARY, 'links': [], 'education': [], 'languages': '', 'projects': [],
+               'experience': [{'id': '0', 'title': 'Developer', 'company': 'Acme', 'start': '2022-01', 'end': '',
+                               'bullets': ['First', 'Second', 'Third']}],
+               'skills': ['MS Office', 'Excel', 'excel', 'Power BI', 'SQL']}
+    d = _tailor_with(client, monkeypatch, [
+        # The model repeats an index and forgets one; it names a skill the CV lacks and forgets two it has.
+        ProposedChange(op='reorder', path='experience.0', order_bullets=[2, 2, 5], reason='Most relevant first.'),
+        ProposedChange(op='reorder', path='skills', order_skills=['sql', 'Tableau', 'Power BI', 'Excel'], reason='x'),
+    ], content)
+    bullets, skills = d['suggestions']
+    assert bullets['order'] == [2, 0, 1] and bullets['suggested'] == 'Third\nFirst\nSecond'
+    assert skills['suggested'] == 'SQL, Power BI, Excel, MS Office, excel' and skills['risk'] == 'auto'
+    assert sorted(skills['suggested'].split(', ')) == sorted(content['skills'])
 
 
 def test_delete_always_needs_approval(client, monkeypatch):
@@ -260,7 +280,7 @@ def test_the_naming_fallback_never_crosses_into_another_project(client, monkeypa
 
 def test_zero_suggestions_is_a_valid_successful_draft(client, monkeypatch):
     d = _tailor_with(client, monkeypatch, [])
-    assert d['suggestions'] == [] and d['proposalStats'] == {'proposed': 0, 'kept': 0, 'rejected': {}}
+    assert d['suggestions'] == [] and d['proposalStats'] == {'proposed': 0, 'kept': 0, 'rejected': {}, 'rejectedExamples': []}
     assert d['id'] and d['sourceCvRevision']
 
 
@@ -518,6 +538,7 @@ def test_new_job_draft_has_revision_and_target_metadata(client, mock_ai):
     assert created['sourceCvId'] == cv and created['sourceCvRevision'] == source['contentRevision']
     assert created['suggestions'][1] == {
         'id': 's1', 'section': 'experience', 'op': 'rewrite', 'original': BULLET, 'suggested': NEW_BULLET,
+        'newTerms': ['designed', 'shipped'],   # words of the rewrite that are nowhere in the CV
         'explanation': 'Clearer for this job.', 'reviewRequired': True, 'risk': 'review', 'jobRequirement': 'Backend',
         'experienceId': '0', 'bulletIndex': 0,
     }
@@ -641,3 +662,120 @@ def test_tailoring_keeps_direct_drafts_and_each_match_identity_separate(client, 
     assert tailor(client, h, cv, company=company, jobUrl=url, jobDescription=context).status_code == 404
     assert client.get(f'{BASE}/tailor/{linked[1]}', headers=h).status_code == 200
     assert mock_ai['calls'] == 4
+
+
+# --- round 1 of the matching/tailoring fixes ---------------------------------------
+
+NO_SUMMARY_CV = {
+    'fullName': 'Ana', 'summary': '', 'links': [], 'education': [], 'languages': '', 'projects': [],
+    'experience': [{'id': '0', 'title': 'Developer', 'company': 'Acme', 'start': '2022-01', 'end': '2023-12',
+                    'bullets': ['Built REST APIs used by 40,000 customers', 'Wrote tests']}],
+    'skills': ['Python']}
+
+
+def test_a_cv_without_a_summary_can_be_offered_one_built_from_its_own_facts(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [
+        rewrite('summary', 'Developer with 2 years of experience building REST APIs for 40.000 customers.')], NO_SUMMARY_CV)
+    (s,) = d['suggestions']   # "2 years" is on the CV's own dates line and 40,000 is in a bullet: neither is invented
+    assert (s['section'], s['op'], s['original'], s['risk'], s['reviewRequired']) == ('summary', 'rewrite', '', 'review', True)
+
+
+def test_a_rewrite_with_a_figure_the_cv_does_not_contain_is_refused(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [
+        rewrite('summary', 'Developer with 7 years of experience.'),
+        rewrite('experience.0.bullets.1', 'Wrote tests, raising coverage to 95%'),
+        rewrite('experience.0.bullets.0', 'Built and maintained REST APIs used by 40,000 customers'),
+    ], NO_SUMMARY_CV)
+    assert [s['suggested'] for s in d['suggestions']] == ['Built and maintained REST APIs used by 40,000 customers']
+    assert d['proposalStats']['rejected'] == {'adds_number': 2}
+
+
+def test_tailoring_from_a_match_reads_the_post_only_when_it_is_the_post_that_match_analysed(client, monkeypatch):
+    from app.services.ai_matching import AnalysisResult
+    from tests.test_matches import analysis
+    seen = []
+    match_analysis = analysis()
+    monkeypatch.setattr(ai_matching, 'analyze',
+                        lambda *a, **k: AnalysisResult(analysis=match_analysis, usage=Usage(10, 10), model='mock'))
+
+    def fake(job_title, company, job_context, cv_sections):
+        seen.append(job_context)
+        return TailoringResult(analysis=tailoring(), usage=Usage(5, 5), model='mock')
+
+    monkeypatch.setattr(ai_tailoring, 'analyze', fake)
+    h = signup(client)
+    cv = make_cv(client, h)
+    mid = client.post(f'{BASE}/matches', headers=h,
+                      json={'cvId': cv, 'jobTitle': 'Backend Engineer', 'jobDescription': JOB}).json()['id']
+    assert client.post(f'{BASE}/tailor', headers=h, json={'matchId': mid, 'jobDescription': f'  {JOB}  '}).status_code == 201
+    assert client.post(f'{BASE}/tailor', headers=h, json={'matchId': mid, 'jobDescription': JOB + ' Also Kubernetes.'}).status_code == 201
+    assert client.post(f'{BASE}/tailor', headers=h, json={'matchId': mid}).status_code == 201
+    assert JOB in seen[0] and "employer's own words" in seen[0]
+    assert len(seen) == 2 and JOB not in seen[1] and 'Kubernetes' not in seen[1]   # a different post is ignored; no post reuses that draft
+
+    async def stored():
+        return [d.model_dump_json() async for d in TailorDraft.find_all()]
+
+    assert all('write tests' not in raw for raw in client.portal.call(stored))   # the post itself is never stored
+
+
+def test_the_tailoring_model_sees_role_dates_and_total_experience(client, mock_ai):
+    h = signup(client)
+    assert tailor(client, h, make_cv(client, h)).status_code == 201
+    assert '[experience.0.dates] Jan 2022 to present (' in mock_ai['last_sections']
+    assert '[total_experience] ' in mock_ai['last_sections']
+
+
+# --- truthfulness guards (measured against real model output) ----------------------
+
+TEACHER_CV = {
+    'fullName': 'Anna', 'summary': 'English teacher with six years of classroom experience.', 'links': [], 'education': [],
+    'languages': 'Polish, English', 'projects': [], 'skills': ['Excel', 'Trello'],
+    'experience': [{'id': 't', 'title': 'English Teacher', 'company': 'School', 'start': '2019-09', 'end': '2025-08', 'bullets': [
+        'Prepared weekly sales reports in Excel', 'Made reports in Excel every week for the sales team',
+        'Organised the annual school trip to London for 40 students', 'Ran weekly meetings of the language department']}]}
+
+
+def test_a_bullet_is_only_removed_when_it_really_repeats_another(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [
+        ProposedChange(op='delete', path='experience.t.bullets.1', reason='Repeats the first bullet.'),
+        ProposedChange(op='delete', path='experience.t.bullets.2', reason='Not relevant to this job.'),
+        ProposedChange(op='delete', path='experience.t.bullets.3', reason='Not relevant to this job.'),
+    ], TEACHER_CV)
+    assert [s['original'] for s in d['suggestions']] == ['Made reports in Excel every week for the sales team']
+    assert d['proposalStats']['rejected'] == {'delete_not_duplicate': 2}
+
+
+def test_self_praise_and_spelled_out_figures_are_refused_and_outside_words_are_listed(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [
+        rewrite('summary', 'Project Coordinator with over nine years of experience organising events.'),
+        rewrite('experience.t.bullets.0', 'Prepared thorough weekly sales reports in Excel, ensuring accuracy'),
+        rewrite('experience.t.bullets.2', 'Organised the annual school trip to London for 40 students, seeking to grow'),
+        rewrite('experience.t.bullets.3', 'Coordinated weekly meetings of the language department'),
+    ], TEACHER_CV)
+    assert d['proposalStats']['rejected'] == {'adds_number': 1, 'adds_unsupported_claim': 2}
+    (kept,) = d['suggestions']
+    assert kept['suggested'].startswith('Coordinated') and kept['newTerms'] == ['coordinated']
+
+
+def test_a_title_the_person_never_held_is_surfaced_word_by_word_for_review(client, monkeypatch):
+    d = _tailor_with(client, monkeypatch, [
+        rewrite('summary', 'Project Coordinator with six years of experience organising school trips and meetings.')], TEACHER_CV)
+    (s,) = d['suggestions']   # the backend cannot judge the claim, but it shows exactly what is not from the CV
+    assert s['newTerms'] == ['project', 'coordinator'] and s['risk'] == 'review'
+
+
+def test_tailoring_is_declined_when_the_cv_shows_nothing_the_job_asks_for(client, monkeypatch):
+    from app.ai_matching.matching import MatchAnalysis, Requirement
+    from app.services.ai_matching import AnalysisResult
+    nothing = MatchAnalysis(enough_info=True, requirements=[
+        Requirement(id=str(i), requirement=name, category='required', source_quote=name, status='not_shown', explanation='x')
+        for i, name in enumerate(['Python', 'MongoDB'])])
+    monkeypatch.setattr(ai_matching, 'analyze', lambda *a, **k: AnalysisResult(analysis=nothing, usage=Usage(1, 1), model='mock'))
+    called = []
+    monkeypatch.setattr(ai_tailoring, 'analyze', lambda *a, **k: called.append(1))
+    h = signup(client)
+    mid = client.post(f'{BASE}/matches', headers=h,
+                      json={'cvId': make_cv(client, h), 'jobTitle': 'Backend Engineer', 'jobDescription': JOB}).json()['id']
+    r = client.post(f'{BASE}/tailor', headers=h, json={'matchId': mid})
+    assert r.status_code == 422 and 'does not show any of the qualifications' in r.json()['detail'] and not called

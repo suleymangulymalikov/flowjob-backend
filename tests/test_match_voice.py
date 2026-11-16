@@ -35,13 +35,13 @@ def test_new_reports_record_the_ai_first_prompt_version(client, mock_ai):
     h = signup(client)
     m = client.post(f'{BASE}/matches', headers=h,
                     json={'cvId': make_cv(client, h), 'jobTitle': 'Backend Engineer', 'jobDescription': JOB}).json()
-    assert ai_matching.PROMPT_VERSION == 'ai-first-exp-1'
+    assert ai_matching.PROMPT_VERSION == 'ai-first-exp-2'
     assert m['score'] == 80 and m['analysisVersion'] == 'ai-first-1'
 
     async def stored():
         return (await MatchRecord.get(PydanticObjectId(m['id']))).prompt_version
 
-    assert client.portal.call(stored) == 'ai-first-exp-1'
+    assert client.portal.call(stored) == 'ai-first-exp-2'
 
 
 def test_historical_third_person_report_is_untouched_and_not_reused(client, mock_ai):
