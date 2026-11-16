@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-TAILORING_PROMPT_VERSION = 'ai-first-1'
+TAILORING_PROMPT_VERSION = 'ai-first-3'
 TAILORING_VERSION = '2'
 MAX_CHANGES = 12
 
@@ -40,6 +40,8 @@ class TailoringAnalysis(BaseModel):
 
 class CreateTailor(BaseModel):
     # Either reuse an existing match (preferred — no second analysis), or pass a CV + job directly.
+    # With a match, jobDescription is optional: when it is the exact post that match analysed (same fingerprint),
+    # the model also reads the post's own wording. It is never stored.
     matchId: str | None = None
     cvId: str | None = None
     jobTitle: str | None = Field(default=None, max_length=200)

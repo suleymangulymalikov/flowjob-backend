@@ -31,6 +31,72 @@ def _skill_key(skill: str) -> str:
     return re.sub(r'[^0-9a-z+#]', '', _fold(skill))
 
 
+_NUMBER = re.compile(r'\d+(?:[.,]\d+)*')
+_NUMBER_WORDS = {w: str(i) for i, w in enumerate(
+    'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen '
+    'eighteen nineteen twenty'.split())} | {'thirty': '30', 'forty': '40', 'fifty': '50', 'hundred': '100', 'thousand': '1000'}
+_WORD = re.compile(r'[0-9a-z+#]+')
+_STOP = frozenset(
+    'a an and are as at be been but by for from had has have in into is it its of on or over that the their this to '
+    'under using used was were which while who will with within your you i my our we they them than then also across '
+    'about more most such including via per each other both all any some new'.split())
+# Self-praise and filler a CV line cannot evidence. Refused unless the CV itself already uses the wording.
+# Words that say nothing checkable on their own: listing them would bury the ones the user must actually verify.
+_GENERIC = frozenset(
+    'experience experienced work worked working role roles skill skills skilled task tasks team teams '
+    'including include includes various several part time full well also both used using use made make making '
+    'background focus focused focusing area areas field level range related relevant based across within through '
+    'developed develop building built build created create creating '
+    'responsible involved helped help support supported supporting provided provide performed perform completed '
+    'complete conducted carried contributed applied apply'.split())
+_UNSUPPORTED = re.compile(
+    r'\b(?:seeking (?:to|a|an)|looking (?:to|for)|aiming to|eager to|detail[- ]oriented|results?[- ](?:driven|oriented)|'
+    r'highly motivated|self[- ]motivated|dedicated professional|proven track record|passionate|ensur(?:e|es|ed|ing)|'
+    r'thorough(?:ly)?|successfully|effectively|efficiently|strong foundation|leverag(?:e|ing)|fast[- ]paced|'
+    r'excellent|exceptional|extensive|seasoned|dynamic)\b')
+
+
+def _numbers(text: str) -> set[str]:
+    """Figures in the text, digits or spelled out ("seven years" counts as 7)."""
+    spelled = {_NUMBER_WORDS[w] for w in _WORD.findall(_fold(text)) if w in _NUMBER_WORDS}
+    return {re.sub(r'[.,]', '', n) for n in _NUMBER.findall(text)} | spelled
+
+
+def _stem(word: str) -> str:
+    for suffix in ('ising', 'izing', 'ation', 'ing', 'ised', 'ized', 'ed', 'es', 'ly', 's'):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[:-len(suffix)]
+    return word
+
+
+def _stems(text: str) -> set[str]:
+    return {_stem(w) for w in _WORD.findall(_fold(text)) if w not in _STOP and not w.isdigit()}
+
+
+def new_terms(suggested: str, cv_text: str) -> list[str]:
+    """Content words of a rewrite that appear nowhere in the CV, in order: shown to the user so that anything the
+    model brought in from outside the CV (often the job post's wording) is visible before they approve it."""
+    known, seen, out = _stems(cv_text), set(), []
+    for word in _WORD.findall(_fold(suggested)):
+        stem = _stem(word)
+        if len(word) >= 4 and word not in _STOP and word not in _GENERIC and not word.isdigit() \
+                and word not in _NUMBER_WORDS and stem not in known and stem not in seen:
+            seen.add(stem)
+            out.append(word)
+    return out[:10]
+
+
+def _repeats_another(bullets: list[str], n: int) -> bool:
+    """The bullet shares most of its content words with another bullet of the same role."""
+    mine = _stems(bullets[n])
+    for i, other in enumerate(bullets):
+        theirs = _stems(other) if i != n else set()
+        shared = mine & theirs
+        if len(shared) >= 2 and len(shared) / max(1, min(len(mine), len(theirs))) >= 0.6:
+            return True
+    return False
+
+
 def _same_wording(a: str, b: str) -> bool:
     """Whitespace, case and a trailing full stop are not a meaningful change."""
     norm = lambda t: ' '.join(t.split()).removesuffix('.').casefold()  # noqa: E731
@@ -99,14 +165,27 @@ def ground(content: dict[str, Any], change: ProposedChange) -> tuple[dict[str, A
             original, _ = bullet_text()
         else:
             return None, 'rewrite_target_not_text'
-        if not original or not original.strip():
-            return None, 'unknown_target'
         text = (change.suggested or '').strip()
+        # A CV with no summary may be offered one (built from the CV's own facts); every other target must exist.
+        writing_summary = where['section'] == 'summary' and not (content.get('summary') or '').strip() \
+            and content.get('summary') in (None, '')
+        if writing_summary:
+            original = ''
+        elif not original or not original.strip():
+            return None, 'unknown_target'
         if not text:
             return None, 'empty_suggestion'
-        if _same_wording(original, text):
+        if not writing_summary and _same_wording(original, text):
             return None, 'cosmetic_no_change'
-        return {**out, 'original': original, 'suggested': text}, None
+        cv_text = ' '.join(_items(content).values())
+        # A figure that appears nowhere in the CV is an invented fact, whatever the wording around it.
+        if _numbers(text) - _numbers(cv_text):
+            return None, 'adds_number'
+        folded_cv = _fold(cv_text)
+        if any(m.group(0) not in folded_cv for m in _UNSUPPORTED.finditer(_fold(text))):
+            return None, 'adds_unsupported_claim'
+        added = new_terms(text, cv_text)
+        return {**out, 'original': original, 'suggested': text, **({'newTerms': added} if added else {})}, None
 
     if change.op == 'delete':
         if where['section'] == 'skills':
@@ -117,28 +196,45 @@ def ground(content: dict[str, Any], change: ProposedChange) -> tuple[dict[str, A
             return {**out, 'original': ', '.join(skills), 'suggested': ', '.join(kept), 'skill': target}, None
         if where['section'] == 'experience' and 'bulletIndex' in where:
             original, reason = bullet_text()
-            return ({**out, 'original': original, 'suggested': ''}, None) if original else (None, reason)
+            if not original:
+                return None, reason
+            role = _one(content.get('experience'), where['experienceId'])
+            bullets = [b for b in role['bullets'] if isinstance(b, str)] if role else []
+            # Removing a bullet removes a fact. Only a bullet that really repeats another one may go.
+            if len(bullets) != len(role['bullets']) or not _repeats_another(role['bullets'], where['bulletIndex']):
+                return None, 'delete_not_duplicate'
+            return {**out, 'original': original, 'suggested': ''}, None
         return None, 'delete_target_not_supported'
 
     if change.op == 'reorder':
         if where['section'] == 'skills':
-            wanted = [_skill_key(x) for x in change.order_skills]
-            have = [_skill_key(x) for x in skills]
-            if len(skills) < 2 or sorted(wanted) != sorted(have) or len(set(have)) != len(have):
+            if len(skills) < 2:
                 return None, 'bad_permutation'
-            if wanted == have:
+            # Follow the model's order for the skills it named and that exist; everything it left out keeps its
+            # original relative order at the end. The result is always the same skills, so nothing is added or lost.
+            remaining = list(skills)
+            new: list[str] = []
+            for key in (_skill_key(x) for x in change.order_skills):
+                hit = next((s for s in remaining if _skill_key(s) == key), None)
+                if hit is not None:
+                    remaining.remove(hit)
+                    new.append(hit)
+            if not new:
+                return None, 'bad_permutation'
+            new += remaining
+            if new == skills:
                 return None, 'no_change'
-            by_key = {_skill_key(x): x for x in skills}
-            new = [by_key[k] for k in wanted]
             return {**out, 'original': ', '.join(skills), 'suggested': ', '.join(new), 'risk': 'auto'}, None
         if where['section'] == 'experience' and 'bulletIndex' not in where:
             role = _one(content.get('experience'), where['experienceId'])
             bullets = role.get('bullets') if role else None
             if not isinstance(bullets, list) or len(bullets) < 2 or not all(isinstance(b, str) for b in bullets):
                 return None, 'unknown_target'
-            order = change.order_bullets
-            if sorted(order) != list(range(len(bullets))):
+            # Same repair as skills: valid indices in the model's order, each once, then the ones it left out.
+            order = list(dict.fromkeys(i for i in change.order_bullets if 0 <= i < len(bullets)))
+            if not order:
                 return None, 'bad_permutation'
+            order += [i for i in range(len(bullets)) if i not in order]
             if order == list(range(len(bullets))):
                 return None, 'no_change'
             return {**out, 'original': '\n'.join(bullets), 'suggested': '\n'.join(bullets[i] for i in order),

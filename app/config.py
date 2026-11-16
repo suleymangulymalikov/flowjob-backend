@@ -16,12 +16,14 @@ class Settings(BaseSettings):
 
     # --- OpenAI job matching (paid). No key => matching returns 503, no calls are made. ---
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4o-mini"  # cost-efficient, supports Structured Outputs
+    # Measured on scripts/tailor_eval: gpt-4.1 counts years of experience correctly, keeps soft traits out of the score
+    # and writes rewrites that pass the truthfulness checks; gpt-4o-mini and gpt-4.1-mini did not.
+    openai_model: str = "gpt-4.1"
     openai_timeout_seconds: float = 30.0
     openai_max_output_tokens: int = 1500
     # Prices (USD per 1M tokens) used only to estimate cost from reported usage.
-    openai_input_price_per_1m: float = 0.15
-    openai_output_price_per_1m: float = 0.60
+    openai_input_price_per_1m: float = 2.00
+    openai_output_price_per_1m: float = 8.00
 
     # Cost/abuse controls
     match_daily_quota: int = 20  # analyses per user per UTC day

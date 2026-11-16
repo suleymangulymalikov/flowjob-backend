@@ -11,7 +11,7 @@ import pytest
 
 from app.ai_matching.matching import (
     MIN_QUALIFICATIONS, NOT_SHOWN_TEXT, SHARES, SYSTEM_PROMPT, Citation, ExcludedItem, MatchAnalysis,
-    Requirement, build_input, evaluate, render_cv, valid_citation, verdict_for,
+    Requirement, build_input, evaluate, quote_in_job, render_cv, valid_citation, verdict_for,
 )
 
 # --- synthetic fixtures (fictional person, fictional company) ---------------------------------------------
@@ -116,7 +116,8 @@ def test_remoexperts_scenario_scores_the_approved_way():
     assert result['qualificationCounts']['standard']['count'] == 0
     assert result['diagnostics'] == {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
                                      'rejected_no_job_quote': 0, 'rejected_working_condition': 0,
-                                     'citations_path_corrected': 0, 'droppedCitations': []}
+                                     'citations_path_corrected': 0, 'job_quotes_accepted_loosely': 0,
+                                     'droppedCitations': []}
 
 
 def test_working_conditions_duties_and_traits_are_outside_the_scored_set():
@@ -508,7 +509,62 @@ def test_a_heading_prefixed_quote_is_scored_and_a_rejection_explains_itself():
         'r7', 'Dashboards in Power BI', 'preferred', 'demonstrated',
         [Citation(path='projects.proj-1.description', quote='Built a Power BI dashboard')],
         source_quote='Experience with dashboards in Power BI')))
+    # A sloppy copy of a line that IS in the post no longer deletes the requirement from the report: it is scored
+    # and counted. (Measured: a smaller model lost four real requirements of one post this way.)
+    out = evaluate(bad, CV, JOB)
+    assert out['rejected'] == [] and out['score'] == 66 and out['diagnostics']['job_quotes_accepted_loosely'] == 1
+    # A requirement the post never mentions is still refused, however plausible it sounds.
+    bad = mutate(lambda a: a.requirements.__setitem__(6, R(
+        'r7', 'Dashboards in Tableau', 'preferred', 'demonstrated',
+        [Citation(path='projects.proj-1.description', quote='Built a Power BI dashboard')],
+        source_quote='Experience with dashboards in Tableau')))
     out = evaluate(bad, CV, JOB)
     (entry,) = out['rejected']
-    assert entry['reason'] == 'quote_not_in_job' and entry['quote'] == 'Experience with dashboards in Power BI'
+    assert entry['reason'] == 'quote_not_in_job' and entry['quote'] == 'Experience with dashboards in Tableau'
     assert JOB not in str(out['rejected'])  # only the short claimed quote, never the post
+
+
+# --- round 1 of the matching fixes --------------------------------------------------
+
+def test_dates_and_durations_are_computed_by_code_for_the_model():
+    from datetime import date
+
+    from app.ai_matching import matching as m
+    today = date(2026, 11, 16)
+    roles = [{'id': 'a', 'start': '2022-03', 'end': '2024-11'}, {'id': 'b', 'start': '2024-06', 'end': ''},
+             {'id': 'c', 'start': 'Summer 2019', 'end': '2019'}, {'id': 'd', 'start': '2025-05', 'end': '2025-01'}]
+    assert m._dates_line(roles[0], today, True) == 'Mar 2022 to Nov 2024 (2 years 9 months)'
+    assert m._dates_line(roles[1], today, True) == 'Jun 2024 to present (2 years 6 months)'
+    assert m._dates_line(roles[2], today, True) == 'Summer 2019 to 2019'          # freeform dates: shown, never measured
+    assert m._dates_line(roles[3], today, True) == 'May 2025 to Jan 2025'         # impossible range: no invented duration
+    assert m._dates_line({'id': 'e'}, today, True) is None
+    # Overlapping months count once: Mar 2022 .. Nov 2026 is 57 months.
+    assert m._total_experience(roles, today) == '4 years 9 months across 2 roles (from the dates below)'
+    assert m._total_experience([roles[2]], today) is None
+    assert m._span(1) == '1 month' and m._span(12) == '1 year' and m._span(0) == '0 months'
+    text = render_cv({'experience': [{'id': 'x', 'title': 'Dev', 'start': '2020-01', 'end': '2020-06', 'bullets': []}],
+                      'education': [{'id': 'y', 'degree': 'BSc', 'start': '2016-10', 'end': '2019-06'}]})
+    assert '[experience.x.dates] Jan 2020 to Jun 2020 (6 months)' in text and '[education.y.dates] Oct 2016 to Jun 2019' in text
+    assert '[total_experience] 6 months across 1 role' in text
+
+
+def test_typographic_variants_are_not_wording_changes_but_real_paraphrases_still_are():
+    cv = {'experience': [{'id': 'e', 'title': 'Dev', 'bullets': ['Built the store’s API – used by “everyone”… daily']}]}
+    assert valid_citation(cv, Citation(path='experience.e.bullets.0', quote='Built the store\'s API - used by "everyone"... daily'))
+    assert not valid_citation(cv, Citation(path='experience.e.bullets.0', quote='Built the shop\'s API'))
+    assert quote_in_job('Must have: 2+ years’ experience — Python', "2+ years' experience - Python")
+    assert not quote_in_job('Must have: 2+ years’ experience — Python', '3+ years experience')
+
+
+def test_a_role_dates_line_is_citable_evidence_for_a_years_requirement():
+    cv = {'experience': [{'id': 'e', 'title': 'Python Developer', 'start': '2022-03', 'end': '2024-11', 'bullets': ['Built APIs']}],
+          'skills': ['Python', 'Git']}
+    job = 'Requirements:\n- 2+ years of Python\n- Git'
+    result = evaluate(MatchAnalysis(enough_info=True, requirements=[
+        Requirement(id='1', requirement='2+ years of Python', category='required', source_quote='2+ years of Python',
+                    status='demonstrated', explanation='Your CV shows 2 years 9 months as a Python Developer.',
+                    evidence=[Citation(path='experience.e.dates', quote='Mar 2022 to Nov 2024 (2 years 9 months)')]),
+        Requirement(id='2', requirement='Git', category='required', source_quote='Git', status='demonstrated',
+                    explanation='You list Git.', evidence=[Citation(path='skills', quote='Git')]),
+    ]), cv, job)
+    assert result['score'] == 100 and result['diagnostics']['citations_dropped'] == 0

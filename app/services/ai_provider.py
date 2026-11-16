@@ -1,10 +1,15 @@
 """Shared OpenAI transport, structured response handling, and error policy."""
 
+import logging
+import re
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ValidationError
 
 from app.config import settings
+
+
+logger = logging.getLogger('uvicorn.error')
 
 
 class AiError(Exception):
@@ -13,6 +18,10 @@ class AiError(Exception):
 
 class AiNotConfigured(AiError):
     pass
+
+
+class AiKeyRejected(AiError):
+    """The provider refused the credentials (wrong, expired or revoked key) or the key lacks access to the model."""
 
 
 class AiTimeout(AiError):
@@ -88,12 +97,19 @@ def request_analysis[T: BaseModel](
                 del request['temperature']
                 response = client.responses.parse(**request)
     except openai.APITimeoutError as error:
+        _log_failure(error)
         raise AiTimeout() from error
     except openai.RateLimitError as error:
+        _log_failure(error)
         raise AiRateLimited() from error
+    except (openai.AuthenticationError, openai.PermissionDeniedError, openai.NotFoundError) as error:
+        _log_failure(error)
+        raise AiKeyRejected() from error
     except (ValidationError, openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError) as error:
+        _log_failure(error)
         raise AiInvalidResponse() from error
     except openai.APIError as error:
+        _log_failure(error)
         raise AiProviderError() from error
 
     parsed = response.output_parsed
@@ -106,9 +122,37 @@ def request_analysis[T: BaseModel](
     )
 
 
+_SAFE_TOKEN = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
+
+
+def _safe_token(value: object) -> str | None:
+    """A provider-defined identifier (error code, error type, request id), or None for anything that is not one."""
+    return value if isinstance(value, str) and _SAFE_TOKEN.fullmatch(value) else None
+
+
+def _log_failure(error: Exception) -> None:
+    """One operator-facing line that says WHY a request failed, without ever logging its text.
+
+    The provider's message and a validation error's text can quote the request or the model's output (a CV, a job
+    post, an email), so only fixed fields are logged: the exception type, the HTTP status and the provider's own
+    error code, error type and request id when they are plain identifiers.
+    """
+    fields = {
+        'status': getattr(error, 'status_code', None) if isinstance(getattr(error, 'status_code', None), int) else None,
+        'code': _safe_token(getattr(error, 'code', None)),
+        'type': _safe_token(getattr(error, 'type', None)),
+        'request_id': _safe_token(getattr(error, 'request_id', None)),
+    }
+    details = ' '.join(f'{key}={value}' for key, value in fields.items() if value is not None)
+    logger.warning('AI request failed (model %s): %s%s', _safe_token(settings.openai_model) or 'unknown',
+                   type(error).__name__, f' ({details})' if details else '')
+
+
 def error_response(error: AiError) -> tuple[int, str]:
     if isinstance(error, AiNotConfigured):
         return 503, 'The AI service is not configured yet.'
+    if isinstance(error, AiKeyRejected):
+        return 503, 'The AI service is not set up correctly. Please contact support.'
     if isinstance(error, AiTimeout):
         return 504, 'The analysis timed out. Please try again.'
     if isinstance(error, AiRateLimited):

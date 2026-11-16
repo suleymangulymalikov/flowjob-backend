@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
+from datetime import date
 from fractions import Fraction
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-MATCH_PROMPT_VERSION = 'exp-1'
+MATCH_PROMPT_VERSION = 'exp-2'
 
 SYSTEM_PROMPT = (
     'You are a careful, professional career assistant. You read a job post and the CV of the person who '
@@ -48,7 +50,10 @@ SYSTEM_PROMPT = (
     '- Only professional qualifications: skills, tools, experience, education, credentials, demonstrable '
     'capabilities.\n'
     '- NEVER working conditions (remote/hybrid/on-site, full/part-time, contract, schedule, commute, '
-    'relocation, work authorization) and never generic personality traits (passionate, motivated...). '
+    'relocation, work authorization) and never generic personality traits or soft qualities that a CV cannot '
+    'evidence (passionate, motivated, attention to detail, team player, organised, proactive, able to follow '
+    'guidelines, good communicator...). A LANGUAGE requirement (for example "English B2", "clear written '
+    'English", "fluent Polish") IS a qualification: judge it against the CV\'s languages line. '
     'List what you excluded, with a one-word reason.\n'
     '- When the post has a requirements/qualifications section, score only from it; responsibilities '
     '("What You Will Do", quality measures, about-the-job text) are context, never extra requirements. '
@@ -63,8 +68,9 @@ SYSTEM_PROMPT = (
     '- standard: everything else, e.g. items under a generic Qualifications or What We\'re Looking For '
     'heading.\n'
     '- Keep "X and Y" combinations as ONE requirement and "X or Y" alternatives as ONE requirement. Merge '
-    'duplicates. Set mandatory_credential=true only for an explicitly mandatory professional licence or '
-    'certification.\n'
+    'duplicates. But a LIST of separate, unrelated skills on one line ("Nice to have: Next.js, WCAG, REST APIs, '
+    'Tailwind CSS") is one requirement PER skill, each quoting just its own words. Set mandatory_credential=true '
+    'only for an explicitly mandatory professional licence or certification.\n'
     '- For every requirement, copy the line or fragment it comes from VERBATIM into source_quote (240 '
     'characters at most). The application rejects any requirement whose quote it cannot find in the post.\n'
     '\n'
@@ -83,12 +89,25 @@ SYSTEM_PROMPT = (
     'about another. If no CV text genuinely bears on the requirement, cite nothing and use not_shown — '
     'never stretch a loosely related quote to fit. Projects, coursework, internships, volunteering and '
     'employment all count when they are genuinely relevant.\n'
+    '- LEVEL matters. "demonstrated" means the CV shows the requirement at the level the post asks. Use '
+    '"partial" when the CV shows the skill but not the level: a tool used only in a personal or university '
+    'project for a requirement asking for professional experience or strong/solid/advanced/deep knowledge; a '
+    'skill that is only listed with nothing showing its use for such a requirement; teaching or school '
+    'activities offered for a business requirement. A plain tool or knowledge requirement with no level ("Git", '
+    '"basic SQL", "Docker is a plus") is demonstrated by any real use or by the skills list.\n'
+    '- YEARS of experience: use the [..dates] lines and the [total_experience] line, which the application '
+    'computed from the CV\'s own dates. Add up the roles that genuinely involve the skill. If that time meets the '
+    'number asked, the requirement is demonstrated (cite the role\'s dates line); if it is clearly less (an '
+    'internship of 6 months for "1+ year", or project work only), it is partial; with no relevant role it is '
+    'not_shown. Never guess a duration that the dates do not support.\n'
     '- explanation: one concise sentence in the SECOND person, always starting "Your CV shows ..." or '
     '"You list ..." — never "the CV", "the candidate" or "they". For not_shown write exactly '
     '"Not shown in your CV." — never say the person lacks the skill.\n'
     '\n'
-    'Do NOT output a numeric score; the application computes it. Set enough_info=false when the post '
-    'lacks identifiable professional qualifications.'
+    'Do NOT output a numeric score; the application computes it. enough_info is ONLY about the JOB POST: set '
+    'it to false only when the post itself contains no identifiable professional qualifications. It has '
+    'nothing to do with the CV. When the CV shows none of what the post asks, still list EVERY qualification '
+    'with status not_shown and keep enough_info=true.'
 )
 
 
@@ -123,21 +142,86 @@ class MatchAnalysis(BaseModel):
 
 # --- CV rendering and citation checking ------------------------------------------------------------
 
+_TYPOGRAPHY = str.maketrans({
+    '‘': "'", '’': "'", '‚': "'", '′': "'", '`': "'",
+    '“': '"', '”': '"', '„': '"', '″': '"',
+    '‐': '-', '‑': '-', '‒': '-', '–': '-', '—': '-', '−': '-',
+    '…': '...', '\u00a0': ' ', '\u200b': '',
+})
+
+
 def _fold(text: str) -> str:
-    return ' '.join(text.casefold().split())
+    """Case, whitespace and typographic variants (curly quotes, dash styles, ligatures) are not wording changes."""
+    return ' '.join(unicodedata.normalize('NFKC', text).translate(_TYPOGRAPHY).casefold().split())
+
+
+# --- dates: computed by code so the model never has to guess a duration -----------------------------
+
+_YEAR_MONTH = re.compile(r'^(\d{4})-(0[1-9]|1[0-2])$')
+_MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+_PRESENT = {'', 'present', 'current', 'now', 'ongoing'}
+
+
+def _month_index(value: Any) -> int | None:
+    m = _YEAR_MONTH.match(value.strip()) if isinstance(value, str) else None
+    return int(m[1]) * 12 + int(m[2]) - 1 if m else None
+
+
+def _span(months: int) -> str:
+    years, rest = divmod(months, 12)
+    parts = ([f'{years} year{"s" if years != 1 else ""}'] if years else []) + (
+        [f'{rest} month{"s" if rest != 1 else ""}'] if rest or not years else [])
+    return ' '.join(parts)
+
+
+def _interval(entry: dict[str, Any], today: date) -> tuple[int, int] | None:
+    """(first month, last month) as month indexes, inclusive; None when the dates are missing or freeform."""
+    start = _month_index(entry.get('start'))
+    raw_end = entry.get('end')
+    ongoing = raw_end is None or (isinstance(raw_end, str) and raw_end.strip().casefold() in _PRESENT)
+    end = today.year * 12 + today.month - 1 if ongoing else _month_index(raw_end)
+    return (start, end) if start is not None and end is not None and end >= start else None
+
+
+def _dates_line(entry: dict[str, Any], today: date, with_duration: bool) -> str | None:
+    start, end = entry.get('start'), entry.get('end')
+    if not (isinstance(start, str) and start.strip()):
+        return None
+    label = lambda v: (f'{_MONTHS[int(v[5:7]) - 1]} {v[:4]}' if _YEAR_MONTH.match(v.strip()) else v.strip())  # noqa: E731
+    ongoing = end is None or (isinstance(end, str) and end.strip().casefold() in _PRESENT)
+    text = f'{label(start)} to {"present" if ongoing else label(end) if isinstance(end, str) else "?"}'
+    span = _interval(entry, today)
+    return f'{text} ({_span(span[1] - span[0] + 1)})' if with_duration and span else text
+
+
+def _total_experience(experience: Any, today: date) -> str | None:
+    """Time covered by the roles' dates, counting overlapping months once."""
+    spans = sorted(s for e in experience or [] if isinstance(e, dict) and (s := _interval(e, today)))
+    if not spans:
+        return None
+    months, reach = 0, -1
+    for first, last in spans:
+        months += max(0, last - max(first, reach + 1) + 1)
+        reach = max(reach, last)
+    return f'{_span(months)} across {len(spans)} role{"s" if len(spans) != 1 else ""} (from the dates below)'
 
 
 def _items(content: dict[str, Any]) -> dict[str, str]:
     """Flatten the CV into {path: text}. The same paths are printed in the prompt, so the model cites them back."""
     c = content or {}
+    today = date.today()
     out: dict[str, str] = {}
     if isinstance(c.get('summary'), str) and c['summary']:
         out['summary'] = c['summary']
+    if total := _total_experience(c.get('experience'), today):
+        out['total_experience'] = total
     for e in c.get('experience') or []:
         key = f'experience.{e.get("id")}'
         for field in ('title', 'company'):
             if isinstance(e.get(field), str) and e[field]:
                 out[f'{key}.{field}'] = e[field]
+        if dates := _dates_line(e, today, with_duration=True):
+            out[f'{key}.dates'] = dates
         for i, b in enumerate(e.get('bullets') or []):
             if isinstance(b, str) and b:
                 out[f'{key}.bullets.{i}'] = b
@@ -146,6 +230,8 @@ def _items(content: dict[str, Any]) -> dict[str, str]:
             for field in fields:
                 if isinstance(e.get(field), str) and e[field]:
                     out[f'{section}.{e.get("id")}.{field}'] = e[field]
+            if section == 'education' and (dates := _dates_line(e, today, with_duration=False)):
+                out[f'education.{e.get("id")}.dates'] = dates
     skills = c.get('skills')
     if isinstance(skills, list) and skills and all(isinstance(s, str) for s in skills):
         out['skills'] = ', '.join(skills)
@@ -238,6 +324,30 @@ def quote_in_job(job_text: str, quote: str) -> bool:
     return False
 
 
+_TOKEN = re.compile(r'[0-9a-z+#]+')
+_FILLER = frozenset('a an and are as at be by for from have in is it of on or our that the this to we with you your will '
+                    'experience knowledge skills ability strong good solid years year plus'.split())
+
+
+def _content_tokens(text: str) -> list[str]:
+    return [t for t in _TOKEN.findall(_fold(text)) if t not in _FILLER]
+
+
+def loosely_in_job(job_text: str, requirement: Requirement) -> bool:
+    """The quote was not copied word for word, but it is clearly about text that IS in the post.
+
+    Every distinctive word of the requirement's NAME must occur in the post, and so must nearly all of the quote's.
+    A requirement the model made up names something the post never mentions, so it still fails. This keeps a
+    sloppy copy (dropped word, reordered list) from silently deleting a real requirement from the report.
+    """
+    post = set(_TOKEN.findall(_fold(job_text)))
+    name = _content_tokens(requirement.requirement)
+    quote = _content_tokens(requirement.source_quote)
+    if not name or not quote or not all(t in post for t in name):
+        return False
+    return sum(t in post for t in quote) / len(quote) >= 0.85
+
+
 # --- deterministic scoring --------------------------------------------------------------------------
 
 SHARES = {'required': 60, 'standard': 25, 'preferred': 15}
@@ -280,7 +390,7 @@ def evaluate(analysis: MatchAnalysis, cv_content: dict[str, Any], job_text: str)
     rejected: list[dict[str, str]] = []  # {id, requirement, reason, quote}: short claimed quote, never the job text
     diagnostics: dict[str, Any] = {'citations_dropped': 0, 'statuses_downgraded': 0, 'duplicate_ids': 0,
                                    'rejected_no_job_quote': 0, 'rejected_working_condition': 0,
-                                   'citations_path_corrected': 0}
+                                   'citations_path_corrected': 0, 'job_quotes_accepted_loosely': 0}
     dropped: list[dict[str, str]] = []  # internal diagnostics: WHICH citations failed, so drops are never silent
     seen: set[str] = set()
     for r in analysis.requirements:
@@ -288,7 +398,9 @@ def evaluate(analysis: MatchAnalysis, cv_content: dict[str, Any], job_text: str)
             diagnostics['duplicate_ids'] += 1
             continue
         seen.add(r.id)
-        if not quote_in_job(job_text, r.source_quote):
+        if not quote_in_job(job_text, r.source_quote) and loosely_in_job(job_text, r):
+            diagnostics['job_quotes_accepted_loosely'] += 1
+        elif not quote_in_job(job_text, r.source_quote):
             # Every scored qualification must reference real text from the post.
             diagnostics['rejected_no_job_quote'] += 1
             rejected.append({'id': r.id, 'requirement': r.requirement, 'reason': 'quote_not_in_job',
