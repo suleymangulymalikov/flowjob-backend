@@ -17,6 +17,7 @@ from tests.test_matches import BASE, JOB, make_cv, signup
     ('connection', 502, 'The AI service is unavailable. Please try again.'),
     ('rate-limit', 429, 'The AI service is busy. Please try again shortly.'),
     ('provider-503', 502, 'The AI service is unavailable. Please try again.'),
+    ('bad-key', 503, 'The AI service is not set up correctly. Please contact support.'),
     ('unusable', 502, 'The AI service returned an unusable result.'),
 ])
 def test_one_sdk_attempt_per_generation_and_explicit_retry_after_failure(
@@ -37,8 +38,8 @@ def test_one_sdk_attempt_per_generation_and_explicit_retry_after_failure(
                 raise httpx.ReadTimeout('synthetic timeout', request=request)
             if failure == 'connection':
                 raise httpx.ConnectError('synthetic disconnect', request=request)
-            if failure in ('rate-limit', 'provider-503'):
-                upstream = 429 if failure == 'rate-limit' else 503
+            if failure in ('rate-limit', 'provider-503', 'bad-key'):
+                upstream = {'rate-limit': 429, 'bad-key': 401}.get(failure, 503)
                 return httpx.Response(upstream, json={'error': {'message': 'synthetic provider error'}})
         else:
             analysis = provider._mock_result().analysis

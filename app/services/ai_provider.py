@@ -1,10 +1,14 @@
 """Shared OpenAI transport, structured response handling, and error policy."""
 
+import logging
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ValidationError
 
 from app.config import settings
+
+
+logger = logging.getLogger('uvicorn.error')
 
 
 class AiError(Exception):
@@ -13,6 +17,10 @@ class AiError(Exception):
 
 class AiNotConfigured(AiError):
     pass
+
+
+class AiKeyRejected(AiError):
+    """The provider refused the credentials (wrong, expired or revoked key) or the key lacks access to the model."""
 
 
 class AiTimeout(AiError):
@@ -88,12 +96,19 @@ def request_analysis[T: BaseModel](
                 del request['temperature']
                 response = client.responses.parse(**request)
     except openai.APITimeoutError as error:
+        _log_failure(error)
         raise AiTimeout() from error
     except openai.RateLimitError as error:
+        _log_failure(error)
         raise AiRateLimited() from error
+    except (openai.AuthenticationError, openai.PermissionDeniedError, openai.NotFoundError) as error:
+        _log_failure(error)
+        raise AiKeyRejected() from error
     except (ValidationError, openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError) as error:
+        _log_failure(error)
         raise AiInvalidResponse() from error
     except openai.APIError as error:
+        _log_failure(error)
         raise AiProviderError() from error
 
     parsed = response.output_parsed
@@ -106,9 +121,18 @@ def request_analysis[T: BaseModel](
     )
 
 
+def _log_failure(error: Exception) -> None:
+    """One operator-facing line with the provider's own reason. The SDK masks the key in its messages; request
+    content (CV, job text) is never part of them."""
+    logger.warning('AI request failed (model %s): %s: %s', settings.openai_model, type(error).__name__,
+                   ' '.join(str(error).split())[:300])
+
+
 def error_response(error: AiError) -> tuple[int, str]:
     if isinstance(error, AiNotConfigured):
         return 503, 'The AI service is not configured yet.'
+    if isinstance(error, AiKeyRejected):
+        return 503, 'The AI service is not set up correctly. Please contact support.'
     if isinstance(error, AiTimeout):
         return 504, 'The analysis timed out. Please try again.'
     if isinstance(error, AiRateLimited):

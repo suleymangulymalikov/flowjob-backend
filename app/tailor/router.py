@@ -150,8 +150,20 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
         job_title = match.job_title
         company = match.company
         job_url = match.job_url
+        detailed = match.result.get('requirements')
+        if isinstance(detailed, list) and len(detailed) >= 2 and all(r.get('status') == 'not_shown' for r in detailed):
+            # Nothing the post asks for is in the CV: rewording cannot honestly close that gap, and a model asked to
+            # try starts inventing. Saying so is the useful answer.
+            raise HTTPException(422, 'Your CV does not show any of the qualifications this job asks for yet, so '
+                                     'tailoring cannot help here. Add your relevant experience to your CV first.')
         job_context = job_context_from_match(match.result)
         missing_qualifications = missing_from_match(match.result)
+        # The match never stores the post. When the client still has it and it is provably the SAME post this
+        # match analysed, the model also reads the employer's own wording (the single biggest quality lever).
+        post = (data.jobDescription or '').strip()
+        if post and len(post) <= settings.match_job_description_max_chars \
+                and job_fingerprint(match.job_title, match.company, match.job_url, post) == match.job_hash:
+            job_context = f'{job_context}\n\nThe job post, in the employer\'s own words:\n{post}'
     else:
         if not (data.cvId and data.jobTitle and data.jobDescription):
             raise HTTPException(422, 'Provide a CV and either a match or a job description.')
@@ -197,6 +209,7 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
             # Resolve every proposal against the source CV. Anything invalid is COUNTED, never silently lost.
             suggestions: list[dict[str, Any]] = []
             rejected: Counter[str] = Counter()
+            rejected_examples: list[dict[str, str]] = []  # op, path and reason only: never CV or job text
             seen_targets: set[tuple[str, str]] = set()
             for i, change in enumerate(analysis.changes):
                 fields, reason = ground(content, change)
@@ -208,10 +221,12 @@ async def create_tailor(data: CreateTailor, user: CurrentUser):
                     fields, reason = None, 'too_many_added_skills'
                 if fields is None:
                     rejected[reason or 'invalid'] += 1
+                    rejected_examples.append({'op': change.op, 'path': change.path[:100], 'reason': reason or 'invalid'})
                     continue
                 seen_targets.add(target)
                 suggestions.append({'id': f's{i}', **fields, 'reviewRequired': fields['risk'] != 'auto'})
-            stats = {'proposed': len(analysis.changes), 'kept': len(suggestions), 'rejected': dict(rejected)}
+            stats = {'proposed': len(analysis.changes), 'kept': len(suggestions), 'rejected': dict(rejected),
+                     'rejectedExamples': rejected_examples[:12]}
 
             draft = TailorDraft(
                 user_id=user.id, source_cv_id=cv.id, source_cv_revision=revision,

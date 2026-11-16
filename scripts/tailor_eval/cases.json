@@ -1,0 +1,449 @@
+[
+ {
+  "id": "01-frontend-strong",
+  "note": "Strong match: React CV for a junior frontend job. Expect a few sharp rewrites, no invented skills.",
+  "jobTitle": "Junior Frontend Developer",
+  "company": "Nimbus Labs",
+  "jobDescription": "Nimbus Labs builds scheduling software for clinics. We are hiring a Junior Frontend Developer in Wrocław (hybrid).\n\nWhat you will do: build and maintain user-facing features in React and TypeScript, work with designers to turn Figma designs into accessible, responsive interfaces, write unit and component tests, and review code with the team.\n\nRequirements: at least 1 year of experience with React; solid TypeScript; experience with component testing (Jest, Vitest or React Testing Library); good understanding of HTML, CSS and responsive design; Git; English at B2 or higher.\n\nNice to have: Next.js, accessibility (WCAG) knowledge, experience with REST APIs, Tailwind CSS.",
+  "cv": {
+   "fullName": "Lina Nowak",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "Frontend developer with internship experience building React and TypeScript interfaces.",
+   "experience": [
+    {
+     "id": "e1",
+     "title": "Frontend Intern",
+     "company": "Brightside Software",
+     "location": "",
+     "start": "2025-06",
+     "end": "2025-12",
+     "bullets": [
+      "Built React components in TypeScript for a clinic dashboard used by 2,000 staff",
+      "Wrote unit tests with Vitest and React Testing Library",
+      "Worked with a designer to implement Figma screens",
+      "Fixed bugs reported by users"
+     ]
+    }
+   ],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "BSc Applied Computer Science",
+     "school": "Wrocław University of Science and Technology",
+     "start": "2023-10",
+     "end": "2027-02"
+    }
+   ],
+   "projects": [
+    {
+     "id": "p1",
+     "name": "FlowJob",
+     "tech": "React, Tailwind CSS, FastAPI",
+     "description": "Job search web app with a CV builder; I led the frontend and consumed the REST API."
+    }
+   ],
+   "skills": [
+    "Git",
+    "HTML",
+    "CSS",
+    "React",
+    "TypeScript",
+    "Figma"
+   ],
+   "languages": "English (C1)"
+  }
+ },
+ {
+  "id": "02-backend-partial",
+  "note": "Partial match: Django developer for a FastAPI/MongoDB job. Docker and FastAPI appear only in a project (add-skill candidates).",
+  "jobTitle": "Backend Developer (Python)",
+  "company": "Kestrel Data",
+  "jobDescription": "Kestrel Data is looking for a Backend Developer to work on our analytics API.\n\nResponsibilities: design and build REST APIs in Python with FastAPI, model data in MongoDB, write automated tests with pytest, containerise services with Docker and deploy through CI/CD pipelines, and take part in on-call rotation.\n\nMust have: 2+ years of professional Python; experience building REST APIs; experience with a NoSQL database, ideally MongoDB; automated testing; Docker.\n\nNice to have: FastAPI, AWS, Redis, experience with asynchronous Python.",
+  "cv": {
+   "fullName": "Piotr Zielinski",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "Python developer with two years of experience building web applications.",
+   "experience": [
+    {
+     "id": "e1",
+     "title": "Python Developer",
+     "company": "Orbit Commerce",
+     "location": "",
+     "start": "2024-03",
+     "end": "",
+     "bullets": [
+      "Developed features for an online store backend in Django",
+      "Built REST endpoints for the mobile app",
+      "Wrote tests",
+      "Helped with deployments"
+     ]
+    },
+    {
+     "id": "e2",
+     "title": "Junior Developer",
+     "company": "Webnest",
+     "location": "",
+     "start": "2023-02",
+     "end": "2024-02",
+     "bullets": [
+      "Maintained internal tools written in Python",
+      "Wrote SQL queries for reports in PostgreSQL"
+     ]
+    }
+   ],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "BSc Computer Science",
+     "school": "University of Wrocław",
+     "start": "2019-10",
+     "end": "2023-02"
+    }
+   ],
+   "projects": [
+    {
+     "id": "p1",
+     "name": "Parcel tracker",
+     "tech": "FastAPI, MongoDB, Docker",
+     "description": "Side project: an API that tracks parcels from several couriers, stores events in MongoDB and runs in Docker."
+    }
+   ],
+   "skills": [
+    "Python",
+    "Django",
+    "PostgreSQL",
+    "Git",
+    "REST APIs"
+   ],
+   "languages": "English (C1)"
+  }
+ },
+ {
+  "id": "03-vague-bullets",
+  "note": "Vague, weak bullets. The useful output is clearer wording without invented numbers or tools.",
+  "jobTitle": "Data Quality Analyst",
+  "company": "Lumen AI",
+  "jobDescription": "Lumen AI trains language models and needs a Data Quality Analyst.\n\nYou will review annotated text and image data for errors, measure annotator agreement, document recurring problems, give feedback to annotators and report quality metrics to the project lead each week.\n\nRequirements: experience with data annotation or labelling; strong attention to detail; confident with spreadsheets (Excel or Google Sheets); clear written English; ability to follow detailed guidelines.\n\nNice to have: basic Python or SQL, experience with Label Studio, experience writing guidelines.",
+  "cv": {
+   "fullName": "Omar Haddad",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "Hard-working person looking for a new opportunity.",
+   "experience": [
+    {
+     "id": "e1",
+     "title": "Data Annotator",
+     "company": "Remote contract",
+     "location": "",
+     "start": "2025-01",
+     "end": "",
+     "bullets": [
+      "Did checks on data",
+      "Worked on labelling tasks for AI",
+      "Worked with spreadsheets",
+      "Helped other annotators"
+     ]
+    },
+    {
+     "id": "e2",
+     "title": "Shop Assistant",
+     "company": "Zabka",
+     "location": "",
+     "start": "2023-06",
+     "end": "2024-12",
+     "bullets": [
+      "Served customers",
+      "Did stock work"
+     ]
+    }
+   ],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "BSc Applied Computer Science",
+     "school": "Wrocław University of Science and Technology",
+     "start": "2023-10",
+     "end": "2027-02"
+    }
+   ],
+   "projects": [],
+   "skills": [
+    "Excel",
+    "Communication",
+    "Teamwork",
+    "Google Sheets"
+   ],
+   "languages": "English (C1), Arabic (native)"
+  }
+ },
+ {
+  "id": "04-career-change",
+  "note": "Career change: teacher applying for project coordinator. Reordering and reframing existing facts matters most.",
+  "jobTitle": "Project Coordinator",
+  "company": "Harbor Events",
+  "jobDescription": "Harbor Events organises corporate conferences across Poland. We need a Project Coordinator.\n\nYou will plan project timelines, coordinate suppliers and internal teams, track budgets, run weekly status meetings, prepare reports for clients and solve problems on event days.\n\nRequirements: experience coordinating people and deadlines; excellent organisation; clear communication in English and Polish; confident with Excel; comfortable presenting to groups.\n\nNice to have: experience with Asana or Trello, budgeting experience, a driving licence.",
+  "cv": {
+   "fullName": "Anna Kowalska",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "English teacher with six years of classroom experience.",
+   "experience": [
+    {
+     "id": "e1",
+     "title": "English Teacher",
+     "company": "Secondary School No. 12",
+     "location": "",
+     "start": "2019-09",
+     "end": "",
+     "bullets": [
+      "Taught English to classes of 25 to 30 students",
+      "Organised the annual school trip to London for 40 students, including booking transport and accommodation and managing the trip budget",
+      "Planned lessons and marked exams",
+      "Ran weekly meetings of the language department",
+      "Presented at parent evenings"
+     ]
+    }
+   ],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "MA English Philology",
+     "school": "University of Wrocław",
+     "start": "2014-10",
+     "end": "2019-06"
+    }
+   ],
+   "projects": [],
+   "skills": [
+    "Lesson planning",
+    "Classroom management",
+    "Excel",
+    "Public speaking",
+    "Trello"
+   ],
+   "languages": "Polish (native), English (C2)"
+  }
+ },
+ {
+  "id": "05-marketing",
+  "note": "Non-technical role with decent overlap. Checks the prompt is not biased toward tech CVs.",
+  "jobTitle": "Digital Marketing Specialist",
+  "company": "Verde Cosmetics",
+  "jobDescription": "Verde Cosmetics is a natural skincare brand. We are hiring a Digital Marketing Specialist.\n\nYou will plan and run paid social campaigns on Meta and TikTok, write and schedule organic content, manage the email newsletter in Klaviyo, track results in Google Analytics and report on return on ad spend every month.\n\nRequirements: 1 to 2 years in digital marketing; hands-on experience with Meta Ads; copywriting skills; experience with email marketing; confident with Google Analytics.\n\nNice to have: Klaviyo, Canva, basic SEO, experience in e-commerce or beauty.",
+  "cv": {
+   "fullName": "Julia Mazur",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "Marketing assistant with experience in social media and email campaigns for an online shop.",
+   "experience": [
+    {
+     "id": "e1",
+     "title": "Marketing Assistant",
+     "company": "Leaf & Loom (online home goods shop)",
+     "location": "",
+     "start": "2024-09",
+     "end": "",
+     "bullets": [
+      "Scheduled posts on Instagram and Facebook",
+      "Set up and monitored Meta Ads campaigns with a monthly budget of 8,000 PLN",
+      "Wrote the weekly email newsletter in Mailchimp, sent to 12,000 subscribers",
+      "Prepared monthly reports from Google Analytics",
+      "Designed graphics in Canva"
+     ]
+    }
+   ],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "BA Marketing and Management",
+     "school": "Wrocław University of Economics",
+     "start": "2021-10",
+     "end": "2024-06"
+    }
+   ],
+   "projects": [],
+   "skills": [
+    "Canva",
+    "Mailchimp",
+    "Copywriting",
+    "Meta Ads",
+    "Google Analytics",
+    "Instagram"
+   ],
+   "languages": "Polish (native), English (B2)"
+  }
+ },
+ {
+  "id": "06-student-no-summary",
+  "note": "Student CV with NO summary and no jobs, only projects. Today the AI cannot write a missing summary.",
+  "jobTitle": "Software Engineering Intern",
+  "company": "Polar Systems",
+  "jobDescription": "Polar Systems offers a 3-month paid internship for students in Wrocław.\n\nYou will join a product team, fix bugs, add small features to our Java and Spring Boot services, write unit tests and take part in code reviews and daily stand-ups.\n\nRequirements: student of computer science or a related field; good knowledge of at least one object-oriented language (Java preferred); understanding of data structures and algorithms; basic SQL; Git; English B2.\n\nNice to have: Spring Boot, Docker, experience working in a team project, Linux.",
+  "cv": {
+   "fullName": "Marek Wojcik",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "",
+   "experience": [],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "BSc Applied Computer Science",
+     "school": "Wrocław University of Science and Technology",
+     "start": "2023-10",
+     "end": "2027-02"
+    }
+   ],
+   "projects": [
+    {
+     "id": "p1",
+     "name": "Library management system",
+     "tech": "Java, Spring Boot, PostgreSQL",
+     "description": "University team project for 4 people: a web app for borrowing books. I wrote the REST API and the database layer and set up Git workflow for the team."
+    },
+    {
+     "id": "p2",
+     "name": "Pathfinding visualiser",
+     "tech": "Python",
+     "description": "Visualises Dijkstra and A* on a grid."
+    },
+    {
+     "id": "p3",
+     "name": "Discord bot",
+     "tech": "JavaScript, Node.js, Docker",
+     "description": "A bot for my study group that posts deadlines; runs in Docker on a Linux VPS."
+    }
+   ],
+   "skills": [
+    "Python",
+    "JavaScript",
+    "Java",
+    "Git",
+    "SQL"
+   ],
+   "languages": "Polish (native), English (B2)"
+  }
+ },
+ {
+  "id": "07-duplicates-messy",
+  "note": "Messy CV with repeated bullets and a duplicate skill. Checks delete and reorder suggestions.",
+  "jobTitle": "Junior Data Analyst",
+  "company": "Finlo",
+  "jobDescription": "Finlo is a fintech startup looking for a Junior Data Analyst.\n\nYou will write SQL queries to answer business questions, build and maintain dashboards in Power BI, clean and validate data, and present findings to non-technical colleagues.\n\nRequirements: strong SQL; experience with a BI tool (Power BI or Tableau); advanced Excel; clear communication; a degree in a quantitative field.\n\nNice to have: Python (pandas), experience in finance, A/B testing knowledge.",
+  "cv": {
+   "fullName": "Kasia Lewandowska",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "Analyst with experience in reporting and data.",
+   "experience": [
+    {
+     "id": "e1",
+     "title": "Reporting Assistant",
+     "company": "Baltic Insurance",
+     "location": "",
+     "start": "2024-07",
+     "end": "",
+     "bullets": [
+      "Prepared weekly sales reports in Excel",
+      "Made reports in Excel every week for the sales team",
+      "Built a Power BI dashboard showing claims by region",
+      "Wrote SQL queries to pull data from the claims database",
+      "Cleaned data before reporting",
+      "Presented monthly results to the sales managers"
+     ]
+    }
+   ],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "BSc Econometrics",
+     "school": "Wrocław University of Economics",
+     "start": "2020-10",
+     "end": "2024-06"
+    }
+   ],
+   "projects": [
+    {
+     "id": "p1",
+     "name": "Thesis",
+     "tech": "Python, pandas",
+     "description": "Analysed 5 years of housing prices in Wrocław using pandas."
+    }
+   ],
+   "skills": [
+    "MS Office",
+    "Excel",
+    "Teamwork",
+    "excel",
+    "Power BI",
+    "SQL",
+    "Communication"
+   ],
+   "languages": "Polish (native), English (C1)"
+  }
+ },
+ {
+  "id": "08-poor-match",
+  "note": "Poor match on purpose: barista for a senior DevOps job. A good result is FEW changes and NO invented skills.",
+  "jobTitle": "Senior DevOps Engineer",
+  "company": "Strato Cloud",
+  "jobDescription": "Strato Cloud runs infrastructure for European banks and is hiring a Senior DevOps Engineer.\n\nYou will design and operate Kubernetes clusters on AWS, write Terraform modules, build CI/CD pipelines in GitLab, own monitoring with Prometheus and Grafana, and lead incident response.\n\nRequirements: 5+ years in DevOps or SRE; deep Kubernetes and AWS knowledge; Terraform; strong Linux and networking; scripting in Python or Go; experience leading incidents.\n\nNice to have: security certifications, experience in regulated industries.",
+  "cv": {
+   "fullName": "Tomek Baran",
+   "email": "test.person@example.com",
+   "phone": "+48 500 100 200",
+   "location": "Wrocław, Poland",
+   "links": [],
+   "summary": "Friendly barista with three years of experience in busy cafes.",
+   "experience": [
+    {
+     "id": "e1",
+     "title": "Barista",
+     "company": "Cafe Central",
+     "location": "",
+     "start": "2023-03",
+     "end": "",
+     "bullets": [
+      "Prepared coffee and served up to 300 customers a day",
+      "Trained 4 new team members",
+      "Handled the till and daily cash reports",
+      "Ordered stock from suppliers"
+     ]
+    }
+   ],
+   "education": [
+    {
+     "id": "ed1",
+     "degree": "High school diploma",
+     "school": "Liceum No. 3, Wrocław",
+     "start": "2019-09",
+     "end": "2022-06"
+    }
+   ],
+   "projects": [],
+   "skills": [
+    "Customer service",
+    "Teamwork",
+    "Cash handling",
+    "Latte art"
+   ],
+   "languages": "Polish (native), English (B1)"
+  }
+ }
+]
