@@ -307,3 +307,22 @@ Account deletion is not implemented in this backend; when it is added, it must r
 Tests replace Google (OAuth, ID tokens and the Gmail API) and the model with deterministic fakes
 (`tests/gmail_fakes.py`, `tests/test_gmail_pipeline.py`). No test reaches Google or OpenAI. A mocked OAuth
 callback is not proof that a real Google client is configured.
+
+## Known limits
+
+- **AI output is checked, not proven true.** The backend verifies tailoring targets, reorder permutations,
+  and that an added skill is named in a verbatim quotation from the CV. It cannot prove that a rewritten
+  sentence adds no new fact, so rewrites always need the user's approval and the truthfulness confirmation.
+  In matching, quotations are verified word for word, but whether a quotation is relevant evidence is left
+  to the prompt.
+- **Profile data has two shapes.** `Profile.frontend_data` holds what the browser edits and is the source of
+  truth for those fields. Edits through the older native profile routes do not update it automatically.
+- **Production hardening is still needed.** Before a public deployment, review HTTPS and cookie settings,
+  allowed origins, routing, login abuse protection, and cookie/CSRF behaviour for the chosen host.
+
+## Tailoring evaluation script
+
+`scripts/tailor_eval/` measures tailoring quality, time and cost on fixed invented test cases (see its
+README). It is not part of the test suite. **It calls OpenAI for real when a real key is configured, which
+costs money, and it creates throwaway accounts in whatever database the backend uses.** Only run it against
+a development database, and only when a paid run has been agreed.

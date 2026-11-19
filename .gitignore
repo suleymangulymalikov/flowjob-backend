@@ -6,7 +6,6 @@ __pycache__/
 CLAUDE.md
 
 # Private configuration and local preservation artifacts
-.env
 .env.*
 !.env.example
 .handoff/
