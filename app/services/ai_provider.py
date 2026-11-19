@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ValidationError
 
-from app.config import settings
+from app.config import mock_ai_problem, settings
 
 
 logger = logging.getLogger('uvicorn.error')
@@ -38,6 +38,34 @@ class AiInvalidResponse(AiError):
 
 class AiProviderError(AiError):
     pass
+
+
+_mock_warned: set[str] = set()
+
+
+def use_mock_ai(workflow: str) -> bool:
+    """Whether `workflow` should return its canned result instead of calling OpenAI.
+
+    Startup already refuses a disallowed mock configuration; this re-checks at call time so a setting changed while
+    running can never serve invented results (the request fails as "not configured" instead). The first canned
+    result of each workflow in a process is logged as a warning.
+    """
+    if not settings.mock_ai:
+        return False
+    if problem := mock_ai_problem(settings):
+        logger.error('Mock AI refused for %s: %s', workflow, problem)
+        raise AiNotConfigured()
+    if workflow not in _mock_warned:
+        _mock_warned.add(workflow)
+        logger.warning('MOCK AI MODE: %s is returning canned results, not OpenAI output.', workflow)
+    return True
+
+
+def log_mock_ai_status() -> None:
+    """Startup warning, so nobody mistakes canned results for real analysis."""
+    if settings.mock_ai:
+        logger.warning('MOCK AI MODE is ON (OPENAI_API_KEY=mock, ALLOW_MOCK_AI=true): Job Matching, Tailoring and '
+                       'Gmail analysis return canned results. Never use this outside tests and local development.')
 
 
 @dataclass

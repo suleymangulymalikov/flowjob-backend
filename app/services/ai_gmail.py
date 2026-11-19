@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from app.config import settings
 from app.gmail.classify import GMAIL_PROMPT_VERSION, SYSTEM_PROMPT, EmailAnalysis
-from app.services.ai_provider import Usage, request_analysis
+from app.services.ai_provider import Usage, request_analysis, use_mock_ai
 
 
 @dataclass
@@ -23,7 +23,7 @@ class GmailAnalysisResult:
 
 def analyze(user_input: str) -> GmailAnalysisResult:
     """One structured call per candidate email. Raises an AiError subclass on failure."""
-    if settings.openai_api_key == 'mock':
+    if use_mock_ai('Gmail analysis'):
         return GmailAnalysisResult(EmailAnalysis(is_recruitment=False, items=[]), Usage(0, 0), 'mock')
     parsed, usage = request_analysis(
         SYSTEM_PROMPT, user_input, EmailAnalysis,

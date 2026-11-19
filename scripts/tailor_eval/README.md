@@ -4,7 +4,7 @@ Measures what CV tailoring actually produces, how long it takes and what it cost
 (`cases.json`, all invented people). Run it before and after changing the prompt, model or pipeline, and
 compare the two result files.
 
-1. Start the backend as usual (real `OPENAI_API_KEY` in `.env` for a real measurement, `mock` for a dry run).
+1. Start the backend as usual (real `OPENAI_API_KEY` in `.env` for a real measurement, `OPENAI_API_KEY=mock` with `ALLOW_MOCK_AI=true` for a free dry run).
 2. From the backend folder: `uv run python scripts/tailor_eval/tailor_eval.py`
 3. Results are saved in `scripts/tailor_eval/results/` (ignored by git).
 

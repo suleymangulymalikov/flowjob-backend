@@ -25,7 +25,7 @@ def job_fingerprint(title: str, company: str | None, url: str | None, context: s
 
 
 def cache_model() -> str:
-    return 'mock' if settings.openai_api_key == 'mock' else settings.openai_model
+    return 'mock' if settings.mock_ai else settings.openai_model
 
 
 async def coalesce_request[T](

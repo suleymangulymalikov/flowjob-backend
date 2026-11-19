@@ -15,7 +15,10 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 30
 
     # --- OpenAI job matching (paid). No key => matching returns 503, no calls are made. ---
+    # OPENAI_API_KEY=mock returns canned AI results with no network call. It is for automated tests and local
+    # development only, so it also needs ALLOW_MOCK_AI=true and is refused with production settings (see check_mock_ai).
     openai_api_key: str | None = None
+    allow_mock_ai: bool = False
     # Measured on scripts/tailor_eval: gpt-4.1 counts years of experience correctly, keeps soft traits out of the score
     # and writes rewrites that pass the truthfulness checks; gpt-4o-mini and gpt-4.1-mini did not.
     openai_model: str = "gpt-4.1"
@@ -76,5 +79,37 @@ class Settings(BaseSettings):
     def gmail_configured(self) -> bool:
         return bool(self.google_oauth_client_id and self.google_oauth_client_secret and self.gmail_token_key)
 
+    @property
+    def mock_ai(self) -> bool:
+        """True when AI features return canned results instead of calling OpenAI."""
+        return self.openai_api_key == 'mock'
+
+
+class MockAiNotAllowed(RuntimeError):
+    """OPENAI_API_KEY=mock is configured where canned AI results must never reach users."""
+
+
+def mock_ai_problem(config: Settings) -> str | None:
+    """Why mock AI may not run with these settings, or None when it is off or explicitly allowed.
+
+    Mock mode returns invented match scores and tailoring suggestions, so it is opt-in twice: the key must be the
+    literal `mock` AND ALLOW_MOCK_AI must be true. COOKIE_SECURE=true marks an HTTPS (production) deployment, where
+    mock mode is refused even if it was allowed. The message never includes configuration values.
+    """
+    if not config.mock_ai:
+        return None
+    if not config.allow_mock_ai:
+        return ('OPENAI_API_KEY=mock returns canned AI results and is only for automated tests and local development. '
+                'Set a real OPENAI_API_KEY, leave it empty to disable AI features, or set ALLOW_MOCK_AI=true locally.')
+    if config.cookie_secure:
+        return 'OPENAI_API_KEY=mock cannot be used with COOKIE_SECURE=true, which marks a production deployment.'
+    return None
+
+
+def check_mock_ai(config: Settings) -> None:
+    if problem := mock_ai_problem(config):
+        raise MockAiNotAllowed(problem)
+
 
 settings = Settings()
+check_mock_ai(settings)  # Refuse to start rather than serve invented AI results.

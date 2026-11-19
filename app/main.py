@@ -23,6 +23,8 @@ async def lifespan(app: FastAPI):
     await init_db()
     from app.config import settings
     from app.gmail.scheduler import scheduler
+    from app.services.ai_provider import log_mock_ai_status
+    log_mock_ai_status()
     if settings.gmail_scheduler_enabled:
         scheduler.start()
     from app.gmail import crypto, sync
