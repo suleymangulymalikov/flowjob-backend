@@ -1,6 +1,6 @@
 # Backend instructions
 
-Read README.md first: it covers setup, tests, limits and the Gmail integration.
+Read README.md first (setup, configuration, tests). Limits and Gmail details are in docs/.
 
 - Repository: suleymangulymalikov/flowjob-backend. Work on a branch from `main` and open a pull request; CI must pass. Preserve history and teammate changes. No push/merge without approval; no force push/reset/history deletion.
 - FastAPI, Pydantic, Beanie and MongoDB only. Browser routes use /api/v1; legacy routes remain supported. No PostgreSQL.
