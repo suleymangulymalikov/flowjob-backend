@@ -57,6 +57,19 @@ Pytest starts and verifies its own MongoDB process before collecting tests. It l
 
 The test runner rejects exported MongoDB settings, including Atlas, localhost and an explicit database name. It ignores the development `.env` and sets a throwaway JWT signing secret and `OPENAI_API_KEY=mock`. CI uses the same launcher with MongoDB 8.0 inside the test job.
 
+### Mock AI mode
+
+`OPENAI_API_KEY=mock` makes Job Matching, Tailoring and Gmail analysis return canned results without calling
+OpenAI. It exists for automated tests and free local development, so it is guarded:
+
+- It only runs when `ALLOW_MOCK_AI=true` is also set. A `mock` key without it stops the backend at startup.
+- It is refused even with `ALLOW_MOCK_AI=true` when `COOKIE_SECURE=true`, which marks an HTTPS deployment.
+- While it is on, the backend logs `MOCK AI MODE is ON` at startup and a warning the first time each feature
+  returns a canned result. If the settings change while it runs, AI requests fail with 503 instead of
+  returning canned results.
+
+The test runner sets both values itself. Never enable mock AI in a deployed environment.
+
 ## AI generation limits
 
 Job Match and AI Tailoring each have a per-user limit for the UTC day

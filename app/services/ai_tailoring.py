@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 from app.config import settings
-from app.services.ai_provider import Usage, request_analysis
+from app.services.ai_provider import Usage, request_analysis, use_mock_ai
 from app.tailor.schemas import MAX_CHANGES, TAILORING_PROMPT_VERSION, ProposedChange, TailoringAnalysis
 
 SYSTEM_PROMPT = (
@@ -130,7 +130,7 @@ def _mock_result(cv_text: str | None = None) -> TailoringResult:
 
 
 def analyze(job_title: str, company: str | None, job_context: str, cv_text: str) -> TailoringResult:
-    if settings.openai_api_key == 'mock':
+    if use_mock_ai('Tailoring'):
         return _mock_result(cv_text)
 
     user_input = build_input(job_title, company, job_context, cv_text)

@@ -20,7 +20,7 @@ from app.ai_matching.matching import (
     MATCH_PROMPT_VERSION, NOT_SHOWN_TEXT, SYSTEM_PROMPT, Citation, ExcludedItem, MatchAnalysis,
     Requirement, build_input,
 )
-from app.services.ai_provider import Usage, request_analysis
+from app.services.ai_provider import Usage, request_analysis, use_mock_ai
 
 PROMPT_VERSION = f'ai-first-{MATCH_PROMPT_VERSION}'
 
@@ -60,9 +60,10 @@ def analyze(job_title: str, company: str | None, job_description: str, cv_conten
     """Call OpenAI once and return the validated structured analysis.
 
     Raises an AiError subclass on failure; the router maps these to HTTP status codes.
-    With OPENAI_API_KEY=mock, returns a canned analysis without any network call or charge.
+    With OPENAI_API_KEY=mock (tests and local development only, see app.config.check_mock_ai), returns a canned
+    analysis without any network call or charge.
     """
-    if settings.openai_api_key == 'mock':
+    if use_mock_ai('Job Matching'):
         return _mock_result()
 
     user_input = build_input(job_title, company, job_description, cv_content)

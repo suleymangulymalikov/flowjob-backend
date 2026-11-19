@@ -29,6 +29,9 @@ def pytest_sessionstart(session):
         env.setenv("MONGODB_URI", mongo.uri)
         env.setenv("MONGODB_DB_NAME", mongo.database)
         env.setenv("OPENAI_API_KEY", "mock")
+        # Mock AI is opt-in and refused with production settings (app.config.check_mock_ai).
+        env.setenv("ALLOW_MOCK_AI", "true")
+        env.setenv("COOKIE_SECURE", "false")
         env.setenv("JWT_SECRET", token_hex(32))
         # Gmail stays unconfigured and the scheduler off unless a test opts in explicitly.
         env.setenv("GMAIL_SCHEDULER_ENABLED", "false")
