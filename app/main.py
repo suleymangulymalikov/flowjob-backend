@@ -9,6 +9,8 @@ from app.matches.router import router as matches_router
 from app.tailor.router import router as tailor_router
 from app.auth.router import router as auth_router
 from app.cv.router import router as cv_router
+from app.cv_import.profile import router as cv_import_profile_router
+from app.cv_import.router import router as cv_import_router
 from app.integration.router import router as ui_router
 from app.db import client, init_db
 from app.gmail.router import router as gmail_router
@@ -50,6 +52,8 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(profiles_router)
 app.include_router(cv_router)
+app.include_router(cv_import_router)
+app.include_router(cv_import_profile_router)
 app.include_router(gmail_router)
 
 

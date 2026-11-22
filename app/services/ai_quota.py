@@ -16,7 +16,7 @@ from pymongo.errors import AutoReconnect, DuplicateKeyError, PyMongoError
 from app.config import settings
 from app.matches.models import MatchUsage
 
-Workflow = Literal['match', 'tailor', 'gmail']
+Workflow = Literal['match', 'tailor', 'gmail', 'import']
 _GLOBAL = PydanticObjectId('000000000000000000000000')
 _log = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ async def reserve_quota(user_id: PydanticObjectId, workflow: Workflow) -> Reserv
     counter = reservation.counter
     gf = reservation.global_field
     user_limit = {'match': settings.match_daily_quota, 'tailor': settings.tailor_daily_quota,
-                  'gmail': settings.gmail_daily_quota}[workflow]
+                  'gmail': settings.gmail_daily_quota, 'import': settings.import_daily_quota}[workflow]
     global_limit = settings.gmail_global_daily_quota if workflow == 'gmail' else settings.ai_global_daily_quota
     user_used = {'$ifNull': [f'${counter}', 0]}
     global_used = {'$ifNull': [f'${gf}', 0]}
@@ -150,7 +150,8 @@ async def reserve_quota(user_id: PydanticObjectId, workflow: Workflow) -> Reserv
     if before is None:
         raise HTTPException(503, 'AI quota is temporarily unavailable. Please try again.')
     if before.get('users', {}).get(workflow, {}).get(str(user_id), 0) >= user_limit:
-        action = {'match': 'AI match', 'tailor': 'CV tailoring', 'gmail': 'email analysis'}[workflow]
+        action = {'match': 'AI match', 'tailor': 'CV tailoring', 'gmail': 'email analysis',
+                  'import': 'CV import'}[workflow]
         raise QuotaExhausted(429, f'Daily {action} limit reached. Please try again tomorrow.')
     if before.get(gf, 0) >= global_limit:
         raise QuotaExhausted(503, 'The AI service is at capacity today. Please try again tomorrow.')
