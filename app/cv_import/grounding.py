@@ -11,7 +11,9 @@ Other mentions of the same company or title elsewhere do not count, and a shorte
 within "Senior Engineer") belongs to the longer one, so two roles at one employer stay apart. An entry's region runs
 from its heading to the next entry heading, the next section heading (Skills, Hobbies, References, ...) or a maximum
 length, whichever comes first. A bullet point, note or description is kept only when it is written inside its own
-entry's region.
+entry's region. Several roles at one employer are often listed under a single company heading: a role whose company is
+the previous role's is also located at its own title line (a line holding only the title, and possibly dates) after
+that previous role's heading and within the same section, so each role keeps its own dates and bullets.
 
 Dates. A date belongs to the entry whose heading it is written at, judged in the visual layout whenever pypdf can
 produce one (its lines and columns show which heading a date sits beside; reading order can merge a sidebar into a
@@ -61,7 +63,11 @@ _DATE_WORDS = re.compile(
     r'wrzesie[nń]|pa[zź]|pa[zź]dziernik|lis|listopad|gru|grudzie[nń]|obecnie|teraz|od|do)\b\.?', re.IGNORECASE)
 _WORD_HYPHEN = re.compile(r'(?<=[^\W\d_])-(?=[^\W\d_])')  # a hyphen between two letters, never next to a digit
 _EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
-_PHONE = re.compile(r'\+?\(?\d[\d\s().\-/]{5,}\d')
+_PHONE = re.compile(r'\(?\+?\(?\d[\d\s().\-/]{5,}\d')  # "(+48) 600 ..." keeps its opening bracket
+# A label written after an address to say what kind it is (Europass and similar templates), never part of the place.
+_ADDRESS_LABEL = re.compile(
+    r'\s*\((?:home|work|office|business|main|permanent|current|private|residence|domicile|dom|praca)\)$', re.IGNORECASE)
+_ADDRESS_PREFIX = re.compile(r'^(?:address|location|adres|lokalizacja)\s*:\s*', re.IGNORECASE)
 _LIST_SEPARATORS = re.compile(r'\s*(?:[,;|•·]|\s/\s)\s*')
 _PRESENT = {'present', 'current', 'currently', 'now', 'ongoing', 'today', 'to date', 'till date', 'to present'}
 _MONTHS = {name: number for number, names in enumerate((
@@ -133,6 +139,22 @@ def _heading_text_with_dates(part: str, names: tuple[str, ...]) -> bool:
     words = re.findall(r'[^\W\d_]+', _DATE_WORDS.sub(' ', part))
     own = {word for name in names for word in re.findall(r'[^\W\d_]+', name)}
     return any(ch.isdigit() for ch in part) and bool(words) and all(word in own for word in words)
+
+
+def _balanced(text: str) -> str:
+    """Brackets without a partner dropped (a match that ended before a number's closing bracket)."""
+    kept, unopened = [], []
+    for char in text:
+        if char == '(':
+            unopened.append(len(kept))
+        elif char == ')':
+            if not unopened:
+                continue
+            unopened.pop()
+        kept.append(char)
+    for index in reversed(unopened):
+        del kept[index]
+    return ' '.join(''.join(kept).split())
 
 
 def _is_heading(line: str) -> bool:
@@ -304,10 +326,15 @@ class Grounder:
         digits = re.sub(r'[^\d+]', '', value)
         for written in self.source.phones:
             if re.sub(r'[^\d+]', '', written) == digits and len(digits) >= 6:
-                written = fold(written)
+                written = _balanced(fold(written))
                 return written if len(written) <= _LIMIT['short'] else ''
         self.warn('phone', value, 'not_in_cv')
         return ''
+
+    def location(self, value: str) -> str:
+        """The place as written. A label around it ("Address: Wroclaw, Poland (Home)") is not part of the place."""
+        value = _ADDRESS_LABEL.sub('', _ADDRESS_PREFIX.sub('', clean(value))).strip()
+        return self.text('location', value, 'label')
 
     def link(self, field: str, value: str) -> str:
         value = clean(value)
@@ -343,6 +370,7 @@ class Grounder:
 
             claimed: set[int] = set()
             previous: dict[str, int] = {}
+            company_heading: dict[str, tuple[str, int]] = {}  # section -> the last located entry's company and heading
             for entry in entries:
                 primary = entry.org or entry.main
                 secondary = entry.main if entry.org and entry.main else ''
@@ -362,6 +390,15 @@ class Grounder:
                         if any(abs(spot - heading) <= HEADER_WINDOW for spot in spots):
                             score += 1
                     candidates.append((score, heading, last))
+                group = company_heading.get(entry.section)
+                if entry.main and entry.org and group and group[0] == entry.org:
+                    # Another role under the previous role's company heading: its own title line counts as a heading
+                    # with its company, if it is after that heading and in the same section.
+                    for position in standalone(entry.main):
+                        if self._grouped_role(form, group[1], position, entry.main):
+                            score = 2 + sum(any(abs(spot - position) <= HEADER_WINDOW
+                                                for spot in self.source.positions(hint, form)) for hint in entry.hints)
+                            candidates.append((score, position, position + len(entry.main) - 1))
                 candidates = [c for c in candidates if c[1] not in claimed]
                 if not candidates:
                     continue
@@ -371,6 +408,8 @@ class Grounder:
                 heading, last = (after or tops)[0]
                 claimed.add(heading)
                 previous[entry.section] = heading
+                if entry.org:
+                    company_heading[entry.section] = (entry.org, heading)
                 self.headers[form][entry.key] = heading
                 self.heading_lines[form][entry.key] = (line_of(heading), line_of(last))
                 if self.source.forms[form].layout:
@@ -379,6 +418,23 @@ class Grounder:
                                if any(name in fold(part) for name in (entry.main, entry.org) if name)]
                     if columns:
                         self.heading_columns[form][entry.key] = min(columns)
+
+    def _grouped_role(self, form: int, company_heading: int, position: int, title: str) -> bool:
+        """Whether `title` at `position` is a role heading under the company heading at `company_heading`: after it,
+        within the same section (no section heading between them) and REGION_MAX, on a line of its own that holds
+        nothing else but dates."""
+        source = self.source.forms[form]
+        if not company_heading < position <= company_heading + REGION_MAX:
+            return False
+        if any(company_heading < h <= position for h in source.headings):
+            return False
+        line = source.line_of(position)
+        start = source.lines[line]
+        end = source.lines[line + 1] - 1 if line + 1 < len(source.lines) else len(source.text)
+        if source.text[start:position].strip():
+            return False  # the title does not start the line ("Promoted to Annotation Specialist")
+        rest = _DATE_WORDS.sub(' ', source.text[position + len(title):end])
+        return not any(ch.isalpha() for ch in rest)  # nothing but dates may follow it on its line
 
     def _region(self, form: int, key: str) -> tuple[int, int] | None:
         heading = self.headers[form].get(key)
@@ -576,7 +632,7 @@ def ground(imported: ImportedCv, text: str, layout_text: str | None = None
         'fullName': g.text('fullName', imported.full_name, 'label'),
         'email': g.email(imported.email),
         'phone': g.phone(imported.phone),
-        'location': g.text('location', imported.location, 'label'),
+        'location': g.location(imported.location),
         'links': [],
         'summary': g.text('summary', imported.summary, 'summary'),
         'experience': [],

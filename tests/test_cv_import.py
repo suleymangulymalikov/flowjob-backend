@@ -893,3 +893,193 @@ def test_a_date_on_the_line_where_a_long_heading_wraps_is_kept():
     content, warnings, _ = ground(empty_cv(education=[edu]), extracted.text, extracted.layout_text)
     assert content['education'][0]['start'] == ''
     assert dict(_reasons(warnings))['education[0].start'] in {'date_not_near_entry', 'date_ambiguous'}
+
+
+# --- several roles under one company heading (Europass-style), contact labels and single dates --------------------
+# Synthetic and anonymized: the names, employers and dates are invented. The structure follows a common CV template:
+# the company is written once, followed by each role with its own date line and bullets.
+
+GROUPED_HTML = """
+<h1>Kai Example</h1>
+<p>Phone: (+48) 600 111 222 (Mobile) Email address: kai.example@example.com Address: gdansk, Poland (Home)</p>
+<h2>About</h2>
+<p>Analyst with QA experience at Globex Services and Northwind Analytics.</p>
+<h2>Work experience</h2>
+<p>Northwind Analytics (Client: Example Corp)</p>
+<p>Data Reviewer</p>
+<p>[ 30/04/2026 - Current ]</p>
+<ul><li>Reviewed large volumes of catalogue data</li><li>Reported recurring data issues</li></ul>
+<p>Globex Services - Poland, Gdansk</p>
+<p>Annotation Specialist - Quality Assurance</p>
+<p>[ 01/09/2025 - 27/04/2026 ]</p>
+<ul><li>Prepared weekly quality reports</li><li>Coached new annotators</li><li>Annotation Specialist onboarding for new hires</li></ul>
+<p>Annotation Specialist</p>
+<p>[ 22/11/2024 - 01/09/2025 ]</p>
+<ul><li>Labeled video datasets for model training</li><li>Met daily accuracy targets</li></ul>
+<h2>Education &amp; training</h2>
+<p>Bachelor in Computer Science</p>
+<p>Example University of Technology [ 01/10/2023 - Current ]</p>
+<p>High School Diploma</p>
+<p>Example International School [ 31/05/2023 ]</p>
+<h2>Skills</h2>
+<p>Quality Assurance | Data Validation | SQL Basics</p>
+"""
+
+
+def grouped_answer(**changes) -> ImportedCv:
+    roles = [
+        ImportedExperience(title='Data Reviewer', company='Northwind Analytics (Client: Example Corp)', location='',
+                           start='30/04/2026', end='Current',
+                           bullets=['Reviewed large volumes of catalogue data', 'Reported recurring data issues']),
+        ImportedExperience(title='Annotation Specialist - Quality Assurance', company='Globex Services',
+                           location='Poland, Gdansk', start='01/09/2025', end='27/04/2026',
+                           bullets=['Prepared weekly quality reports', 'Coached new annotators',
+                                    'Annotation Specialist onboarding for new hires']),
+        ImportedExperience(title='Annotation Specialist', company='Globex Services', location='',
+                           start='22/11/2024', end='01/09/2025',
+                           bullets=['Labeled video datasets for model training', 'Met daily accuracy targets']),
+    ]
+    base = {
+        'full_name': 'Kai Example', 'email': 'kai.example@example.com', 'phone': '(+48) 600 111 222',
+        'location': 'gdansk, Poland (Home)', 'links': [],
+        'summary': 'Analyst with QA experience at Globex Services and Northwind Analytics.',
+        'experience': roles,
+        'education': [
+            ImportedEducation(school='Example University of Technology', degree='Bachelor in Computer Science',
+                              start='01/10/2023', end='Current', note=''),
+            ImportedEducation(school='Example International School', degree='High School Diploma', start='',
+                              end='31/05/2023', note=''),
+        ],
+        'projects': [], 'skills': ['Quality Assurance', 'Data Validation', 'SQL Basics'], 'languages': '',
+    }
+    base.update(changes)
+    return ImportedCv(**base)
+
+
+@pytest.fixture(scope='module')
+def grouped():
+    return asyncio.run(extract.extract_text(pdf(GROUPED_HTML)))
+
+
+@pytest.mark.parametrize('use_layout', [True, False])
+def test_each_role_under_one_company_heading_keeps_its_own_dates_and_bullets(grouped, use_layout):
+    content, warnings, missing = ground(grouped_answer(), grouped.text, grouped.layout_text if use_layout else None)
+    assert warnings == [] and missing == []
+    jobs = [(job['title'], job['company'], job['start'], job['end'], job['bullets']) for job in content['experience']]
+    assert jobs == [
+        ('Data Reviewer', 'Northwind Analytics (Client: Example Corp)', '30/04/2026', '',
+         ['Reviewed large volumes of catalogue data', 'Reported recurring data issues']),
+        ('Annotation Specialist - Quality Assurance', 'Globex Services', '01/09/2025', '27/04/2026',
+         ['Prepared weekly quality reports', 'Coached new annotators', 'Annotation Specialist onboarding for new hires']),
+        ('Annotation Specialist', 'Globex Services', '22/11/2024', '01/09/2025',
+         ['Labeled video datasets for model training', 'Met daily accuracy targets']),
+    ]
+
+
+def test_roles_under_one_company_heading_still_cannot_swap_dates_or_bullets(grouped):
+    swapped = grouped_answer()
+    second, third = swapped.experience[1], swapped.experience[2]
+    second.bullets, third.bullets = ['Labeled video datasets for model training'], ['Prepared weekly quality reports']
+    second.start, third.start = '22/11/2024', '27/04/2026'  # each written only at the other role
+    content, warnings, _ = ground(swapped, grouped.text, grouped.layout_text)
+    assert content['experience'][1]['bullets'] == [] and content['experience'][2]['bullets'] == []
+    assert content['experience'][1]['start'] == '' and content['experience'][2]['start'] == ''
+    reasons = {w['field']: w['reason'] for w in warnings}
+    assert reasons['experience[1].bullets[0]'] == reasons['experience[2].bullets[0]'] == 'under_other_entry'
+    assert reasons['experience[1].start'] in {'date_not_near_entry', 'date_ambiguous'}
+    assert reasons['experience[2].start'] in {'date_not_near_entry', 'date_ambiguous'}
+
+
+def test_a_role_is_never_placed_in_the_summary_or_at_a_bullet_that_starts_with_its_title(grouped):
+    """The company is also named in the summary, and a bullet starts with the role's title: neither is its heading."""
+    content, _, _ = ground(grouped_answer(), grouped.text, grouped.layout_text)
+    first = content['experience'][1]['bullets']
+    assert 'Annotation Specialist onboarding for new hires' in first  # still the previous role's bullet
+    assert content['experience'][2]['bullets'][0] == 'Labeled video datasets for model training'
+
+
+def test_a_role_claiming_another_company_never_inherits_the_grouped_heading(grouped):
+    """Only a role whose company is the previous role's may use a bare title line: a role attributed to another
+    company in the CV (named in the summary too) gets neither the grouped role's dates nor its bullets."""
+    answer = grouped_answer()
+    answer.experience[2].company = 'Northwind Analytics'
+    content, warnings, _ = ground(answer, grouped.text, grouped.layout_text)
+    third = content['experience'][2]
+    assert (third['start'], third['end'], third['bullets']) == ('', '', [])
+    reasons = {w['field']: w['reason'] for w in warnings}
+    assert reasons['experience[2].bullets[0]'] == 'under_other_entry'
+    assert reasons['experience[2].start'] in {'date_not_near_entry', 'date_ambiguous'}
+    assert content['experience'][1]['bullets'][:2] == ['Prepared weekly quality reports', 'Coached new annotators']
+
+
+def test_a_grouped_title_line_in_another_section_is_not_a_heading():
+    html = GROUPED_HTML.replace(
+        '<p>Annotation Specialist</p>\n<p>[ 22/11/2024 - 01/09/2025 ]</p>\n'
+        '<ul><li>Labeled video datasets for model training</li><li>Met daily accuracy targets</li></ul>\n', '')
+    html = html.replace('<h2>Skills</h2>', '<h2>Skills</h2>\n<p>Annotation Specialist</p>\n'
+                        '<p>Labeled video datasets for model training</p>')
+    extracted = asyncio.run(extract.extract_text(pdf(html)))
+    answer = grouped_answer()
+    answer.experience[2].start = answer.experience[2].end = ''
+    answer.experience[2].bullets = ['Labeled video datasets for model training']
+    content, warnings, _ = ground(answer, extracted.text, extracted.layout_text)
+    assert content['experience'][2]['bullets'] == []
+    assert any(w['field'] == 'experience[2].bullets[0]' for w in warnings)
+
+
+def test_contact_labels_are_not_part_of_the_location_or_phone(grouped):
+    content, warnings, _ = ground(grouped_answer(), grouped.text, grouped.layout_text)
+    assert content['location'] == 'gdansk, Poland'  # as written, without "(Home)"
+    assert content['phone'] == '(+48) 600 111 222'  # with its opening bracket, without "(Mobile)"
+    for written in ('Address: gdansk, Poland (Home)', 'gdansk, Poland (home)'):
+        assert ground(grouped_answer(location=written), grouped.text, grouped.layout_text)[0]['location'] == \
+            'gdansk, Poland'
+    # Only address-type labels are removed; anything else must still be written in the CV.
+    content, warnings, _ = ground(grouped_answer(location='gdansk, Poland (Oliwa)'), grouped.text)
+    assert content['location'] == '' and warnings[0]['reason'] == 'not_in_cv'
+
+
+@pytest.mark.parametrize('written, kept', [
+    ('Phone: (+48) 600 111 222 (Mobile)', '(+48) 600 111 222'),
+    ('Call (+48 600 111 222) after 5 pm', '+48 600 111 222'),
+    ('Tel. +48 600-111-222', '+48 600-111-222'),
+    ('Phone: (058) 600 1112', '(058) 600 1112'),
+])
+def test_phone_numbers_keep_their_written_form_with_balanced_brackets(written, kept):
+    text = f'Kai Example\n{written}\nkai.example@example.com'
+    digits = ''.join(ch for ch in kept if ch.isdigit() or ch == '+')
+    content, warnings, _ = ground(empty_cv(full_name='Kai Example', phone=digits), text)
+    assert content['phone'] == kept and warnings == []
+
+
+def test_a_single_completion_date_stays_with_its_school_as_written(grouped):
+    content, warnings, _ = ground(grouped_answer(), grouped.text, grouped.layout_text)
+    school = content['education'][1]
+    assert (school['degree'], school['start'], school['end']) == ('High School Diploma', '', '31/05/2023')
+    assert normalize_date('31/05/2023') == '31/05/2023'  # day/month/year is kept exactly as written
+    assert not [w for w in warnings if w['field'].startswith('education')]
+
+
+def test_the_prompt_covers_grouped_roles_labels_and_single_dates():
+    prompt = ai_cv_import.SYSTEM_PROMPT
+    assert 'several roles are listed under one company heading' in prompt
+    assert '"(Home)"' in prompt and 'single date' in prompt
+    assert ai_cv_import.IMPORT_PROMPT_VERSION == 'cv-import-2'
+
+
+def test_a_bullet_ending_with_the_next_role_s_title_is_not_its_heading():
+    """"Promoted to Annotation Specialist" stays the previous role's bullet, even when the next role has no dates or
+    bullets that could tell the two lines apart."""
+    html = GROUPED_HTML.replace('<li>Prepared weekly quality reports</li>',
+                                '<li>Promoted to Annotation Specialist</li><li>Prepared weekly quality reports</li>')
+    html = html.replace('<p>[ 22/11/2024 - 01/09/2025 ]</p>\n<ul><li>Labeled video datasets for model training</li>'
+                        '<li>Met daily accuracy targets</li></ul>', '')
+    extracted = asyncio.run(extract.extract_text(pdf(html)))
+    answer = grouped_answer()
+    answer.experience[1].bullets.insert(0, 'Promoted to Annotation Specialist')
+    answer.experience[2].start = answer.experience[2].end = ''
+    answer.experience[2].bullets = []
+    for layout in (extracted.layout_text, None):
+        content, warnings, _ = ground(answer, extracted.text, layout)
+        assert content['experience'][1]['bullets'][0] == 'Promoted to Annotation Specialist'
+        assert not [w for w in warnings if w['field'].startswith('experience[1]')]

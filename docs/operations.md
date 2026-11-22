@@ -95,7 +95,10 @@ capitalization; hyphens next to digits always count, and words must match whole.
 
 Each job, school and project is located at its own heading, where its title and organization appear on the same or
 adjacent lines; other mentions of the same company elsewhere in the CV do not count, so several positions at one
-employer stay separate. Bullet points, notes and descriptions are kept only when they are written in their own
+employer stay separate. Several roles listed under one company heading (the company written once, then each role with
+its own dates and bullets) are each located at their own title line: a line holding only the title, and possibly
+dates, after the previous role's heading at the same company and within the same section. Bullet points, notes and
+descriptions are kept only when they are written in their own
 entry's region, which ends at the next entry or section heading (Skills, Hobbies, References and similar, in English
 and Polish); text before the first entry or in other sections is never attached to an entry. Dates must be written
 at their own entry's heading. They are judged in the layout version whenever it exists: on the heading's own lines
@@ -103,7 +106,10 @@ at their own entry's heading. They are judged in the layout version whenever it 
 a right-aligned date is pushed onto its own line by a narrow column or a wide font. A sidebar year left of the
 heading never counts. A date line between two headings is assigned only when the rest of the CV shows whether dates
 come after or before headings; otherwise it is reported as ambiguous (`date_ambiguous`) and left out. Without a
-layout version, reading order is used, and a block of dates printed apart from the entries is never assigned. A phone number is returned as the CV writes it. Only unambiguous month formats such as
+layout version, reading order is used, and a block of dates printed apart from the entries is never assigned. A phone number is returned as the CV writes it, including a bracketed country code such as `(+48)`, without labels
+such as `(Mobile)`. The location is the place as written, without labels such as `Address:` or `(Home)`. An entry with
+a single date (such as a graduation date) keeps it as its end date. Dates written as day/month/year are kept as
+written. Only unambiguous month formats such as
 `Jan 2020` or `01/2020` are converted to `2020-01`; anything else is kept as written, and `Present` marks an ongoing
 entry. Every value left out is listed in `warnings` with a reason, and empty fields are listed in `missing`.
 

@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.services.ai_provider import Usage, request_analysis, use_mock_ai
 
-IMPORT_PROMPT_VERSION = 'cv-import-1'
+IMPORT_PROMPT_VERSION = 'cv-import-2'
 
 
 class ImportedExperience(BaseModel):
@@ -64,9 +64,14 @@ SYSTEM_PROMPT = (
     '- Never add anything that is not in the text: no inferred skills, job titles, degrees, dates, durations, '
     'locations, achievements or contact details. If a field is not in the text, use an empty string or empty list.\n'
     '- Dates: copy each start and end date exactly as written next to that entry (for example "Jan 2020", '
-    '"09/2018", "2019", "Present"). Never guess a missing month or year and never move a date to another entry.\n'
+    '"09/2018", "2019", "Present"). Never guess a missing month or year and never move a date to another entry. '
+    'An entry with a single date (such as a graduation date) has it as end, with start empty.\n'
     '- experience: one entry per job or internship, with title, company, location, start, end and its bullet '
-    'points. Each bullet is one achievement or duty copied as written, without the bullet symbol.\n'
+    'points. Each bullet is one achievement or duty copied as written, without the bullet symbol. When several '
+    'roles are listed under one company heading, give each role its own entry with that company, and its own dates '
+    'and bullets.\n'
+    '- location and phone: as written, without labels such as "Address:", "Phone:", "(Home)" or "(Mobile)". '
+    'location is the place only (for example "Berlin, Germany").\n'
     '- education: one entry per school or programme; note holds extra lines written under that entry (for example '
     'grades or thesis), copied as written.\n'
     '- projects: name, technologies exactly as listed (tech), and the description as written.\n'
