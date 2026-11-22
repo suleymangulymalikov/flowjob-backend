@@ -15,9 +15,9 @@ This repository contains the **REST API**, built with FastAPI and MongoDB. The w
   WeasyPrint for preview and download.
 - **Job Matching**: OpenAI extracts the job's requirements and quotes evidence from the CV; the backend verifies
   every quotation and calculates the score itself. Results are cached and limited per user and per day.
-- **Smart CV Import**: turns the selectable text of an uploaded PDF CV into the CV Builder's structure for the
-  user to review. Every value is checked against the PDF's own text; nothing is stored until the user saves the
-  CV.
+- **Smart CV Import**: turns the selectable text of an uploaded PDF CV into the user's main Profile, once per
+  account. Every value is checked against the PDF's own text, and nothing is stored until the user reviews and
+  saves it to the Profile. No CV is created; a CV made from the Profile later is an independent copy.
 - **CV Tailoring**: proposes typed, verified changes (reorders, rewrites, new skills) for a specific job. Only
   changes the user approves are applied, and the result is saved as a new CV; the original is never modified.
 - **Applications**: track applications with status, history, follow-up dates, notes and the CV that was sent.
@@ -48,7 +48,7 @@ app/
   users/, profiles/  account and profile
   integration/       browser API: profile, saved CVs, CV PDFs, account settings
   cv/                CV validation and Harvard PDF rendering (templates/harvard.html)
-  cv_import/         Smart CV Import: isolated PDF text extraction, checks against the PDF text, endpoint
+  cv_import/         Smart CV Import: isolated PDF text extraction, checks against the PDF text, one-time Profile save
   matches/           Job Matching API
   ai_matching/       requirement extraction, citation checks and scoring
   tailor/            CV Tailoring API and verification of suggested changes
@@ -153,7 +153,7 @@ still available. Full request and response schemas are in the interactive docume
 | Account | `PATCH /api/v1/me`, `POST /api/v1/me/password` |
 | Profile | `GET`, `PUT /api/v1/profile` |
 | CVs | `/api/v1/cvs` (list, create, read, update, delete), `GET /api/v1/cvs/{id}/pdf`, `POST /api/v1/cvs/preview/pdf` |
-| Smart CV Import | `POST /api/v1/cvs/import` (see [docs/operations.md](docs/operations.md#smart-cv-import)) |
+| Smart CV Import | `GET`, `POST /api/v1/profile/import`, `POST /api/v1/profile/import/pdf` (see [docs/operations.md](docs/operations.md#smart-cv-import)) |
 | Job Matching | `POST`, `GET /api/v1/matches`, `GET`, `DELETE /api/v1/matches/{id}` |
 | CV Tailoring | `POST /api/v1/tailor`, `GET /api/v1/tailor/{id}`, `GET /api/v1/tailor/capabilities` |
 | Applications | `/api/v1/applications` (list, create, read, update, delete) |

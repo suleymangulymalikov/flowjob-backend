@@ -161,27 +161,34 @@ def year_month(s: Any) -> str | None:
     return s if isinstance(s, str) and re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', s) else None
 
 
+def native_sections(data: UIProfile) -> dict[str, Any]:
+    """The browser profile mirrored into the native model (used by the legacy /cv/pdf download)."""
+    links = data.links + ['', '', '']
+    return {
+        'personal': Personal(phone=data.phone, location=data.location, summary=data.summary,
+                             linkedin=links[0] or None, github=links[1] or None, website=links[2] or None),
+        'skills': data.skills,
+        'experience': [Experience(company=str(x.get('company') or ''), position=str(x.get('title') or ''),
+                                  location=x.get('location') or None, start=year_month(x.get('start')),
+                                  end=year_month(x.get('end')), bullets=x.get('bullets') or [])
+                       for x in data.experience if year_month(x.get('start'))],
+        'education': [Education(institution=str(x.get('school') or ''), degree=str(x.get('degree') or ''),
+                                start=year_month(x.get('start')), end=year_month(x.get('end')),
+                                description=x.get('note') or None)
+                      for x in data.education if year_month(x.get('start'))],
+        'projects': [Project(name=str(x.get('name') or ''), description=x.get('description') or None,
+                             technologies=[s.strip() for s in str(x.get('tech') or '').split(',') if s.strip()])
+                     for x in data.projects],
+        # Freeform language text is preserved in frontend_data; native levels require structured input.
+    }
+
+
 @router.put('/profile')
 async def save_profile(data: UIProfile, user: CurrentUser):
     profile = await Profile.find_one(Profile.user_id == user.id) or Profile(user_id=user.id)
     profile.frontend_data = data.model_dump()
-    links = data.links + ['', '', '']
-    profile.personal = Personal(phone=data.phone, location=data.location, summary=data.summary,
-                                linkedin=links[0] or None, github=links[1] or None,
-                                website=links[2] or None)
-    profile.skills = data.skills
-    profile.experience = [Experience(company=str(x.get('company') or ''), position=str(x.get('title') or ''),
-                                     location=x.get('location') or None, start=year_month(x.get('start')),
-                                     end=year_month(x.get('end')), bullets=x.get('bullets') or [])
-                          for x in data.experience if year_month(x.get('start'))]
-    profile.education = [Education(institution=str(x.get('school') or ''), degree=str(x.get('degree') or ''),
-                                   start=year_month(x.get('start')), end=year_month(x.get('end')),
-                                   description=x.get('note') or None)
-                         for x in data.education if year_month(x.get('start'))]
-    profile.projects = [Project(name=str(x.get('name') or ''), description=x.get('description') or None,
-                                technologies=[s.strip() for s in str(x.get('tech') or '').split(',') if s.strip()])
-                        for x in data.projects]
-    # Freeform language text is preserved in frontend_data; native levels require structured input.
+    for section, value in native_sections(data).items():
+        setattr(profile, section, value)
     await profile.save()
     return profile.frontend_data
 

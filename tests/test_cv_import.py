@@ -1,4 +1,5 @@
-"""Smart CV Import: file safety, isolated extraction, grounding against the PDF text, quota and privacy.
+"""Smart CV Import: file safety, isolated extraction, grounding against the PDF text, quota and privacy, and the
+one-time save into the Profile.
 
 OpenAI is never called: the suite runs with mock AI, and tests that need a specific model answer replace
 ai_cv_import.analyze. PDFs are generated locally with WeasyPrint or pypdf.
@@ -90,7 +91,7 @@ def answer(cv: ImportedCv):
 
 
 def import_pdf(client, headers, body=None, extra=None):
-    return client.post(f'{BASE}/cvs/import', content=pdf() if body is None else body,
+    return client.post(f'{BASE}/profile/import/pdf', content=pdf() if body is None else body,
                        headers={**headers, **CONSENT, **(extra or {})})
 
 
@@ -368,9 +369,9 @@ def test_busy_parsers_answer_503(client, monkeypatch):
 # --- the endpoint ------------------------------------------------------------------------------------------------
 
 def test_import_requires_login_consent_and_a_pdf_body(client):
-    assert client.post(f'{BASE}/cvs/import', content=pdf(), headers=CONSENT).status_code == 401
+    assert client.post(f'{BASE}/profile/import/pdf', content=pdf(), headers=CONSENT).status_code == 401
     h = signup(client)
-    r = client.post(f'{BASE}/cvs/import', content=pdf(), headers={**h, 'Content-Type': 'application/pdf'})
+    r = client.post(f'{BASE}/profile/import/pdf', content=pdf(), headers={**h, 'Content-Type': 'application/pdf'})
     assert r.status_code == 428 and 'OpenAI' in r.json()['detail']
     r = import_pdf(client, h, extra={'Content-Type': 'multipart/form-data; boundary=x'})
     assert r.status_code == 415
@@ -402,11 +403,7 @@ def test_a_successful_import_returns_grounded_content_and_saves_nothing(client, 
     assert client.portal.call(snapshot) == before  # no CV, file or text stored
     assert client.get(f'{BASE}/cvs', headers=h).json() == []
     assert quota_used(client) == (1, 1)
-
-    # The reviewed content saves through the existing endpoint, unchanged.
-    saved = client.post(f'{BASE}/cvs', headers=h, json={'name': 'Imported CV', 'kind': 'original',
-                                                         'content': body['content']})
-    assert saved.status_code == 201 and saved.json()['content']['skills'] == body['content']['skills']
+    assert client.get(f'{BASE}/profile/import', headers=h).json()['available'] is True  # extracting uses nothing up
 
 
 def test_mock_ai_mode_imports_only_what_it_can_ground(client):

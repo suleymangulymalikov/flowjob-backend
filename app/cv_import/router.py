@@ -1,11 +1,11 @@
-"""POST /api/v1/cvs/import: organize an uploaded PDF CV into the CV Builder's structure for the user to review.
+"""POST /api/v1/profile/import/pdf: organize an uploaded PDF CV into the Profile's structure for the user to review.
 
-Nothing is stored: the PDF, its text and the result stay in memory for this request only. The reviewed CV is saved
-later, and only through POST /api/v1/cvs after the user confirms it.
+Nothing is stored: the PDF, its text and the result stay in memory for this request only. The reviewed result is
+saved later, and only through POST /api/v1/profile/import (profile.py) after the user confirms it, once per account.
 
 Order of work, so failures never cost an AI call or a quota unit:
-consent and file checks -> bounded text extraction -> reserve one `import` quota unit -> one AI call (refunded if it
-fails) -> grounding checks against the extracted text -> CvContent validation.
+import not used yet -> consent and file checks -> bounded text extraction -> reserve one `import` quota unit -> one
+AI call (refunded if it fails) -> grounding checks against the extracted text -> CvContent validation.
 
 The quota reservation and the AI call run in their own task, shielded from the request (the pattern Match and Tailor
 use via coalesce_request): if the client disconnects or the request is cancelled, the billable call still settles its
@@ -24,6 +24,7 @@ from app.auth.dependencies import get_current_user
 from app.cv.content import CvContent, CvWorkloadError
 from app.cv_import.extract import ERRORS, MAX_PDF_BYTES, ImportFileError, extract_text
 from app.cv_import.grounding import ground
+from app.cv_import.profile import ALREADY_IMPORTED, import_used
 from app.request_limits import BoundedPayloadRoute
 from app.services import ai_cv_import
 from app.services.ai_provider import AiError, error_response
@@ -67,7 +68,7 @@ async def _organize(user: User, text: str, layout_text: str | None) -> ai_cv_imp
     return await asyncio.shield(task)
 
 
-@router.post('/cvs/import')
+@router.post('/profile/import/pdf')
 async def import_cv(
     request: Request,
     user: CurrentUser,
@@ -75,6 +76,8 @@ async def import_cv(
 ):
     """Body: the PDF itself (`Content-Type: application/pdf`, at most 5 MB). Requires the consent header, which the
     app sends only after the user agrees that the CV text is sent to OpenAI to organize it."""
+    if await import_used(user):
+        raise HTTPException(*ALREADY_IMPORTED)  # before any work, so it never costs an AI call or a quota unit
     if consent != CONSENT_VALUE:
         raise HTTPException(428, 'Confirm that your CV text may be sent to OpenAI to organize it, then try again.')
     media_type = request.headers.get('content-type', '').split(';', 1)[0].strip().lower()

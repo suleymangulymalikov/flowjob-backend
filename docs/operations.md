@@ -53,11 +53,19 @@ requests receive 503 and a short Retry-After header.
 
 ## Smart CV Import
 
-`POST /api/v1/cvs/import` organizes an uploaded PDF CV into the CV Builder's structure for the user to review. It
-stores nothing: the PDF, its text and the result exist only during the request. The reviewed CV is saved later,
-only through `POST /api/v1/cvs`.
+Smart CV Import fills the user's main Profile from an existing PDF CV, once per account:
 
-**Request.** The body is the PDF itself with `Content-Type: application/pdf`. The request must carry the header
+1. `POST /api/v1/profile/import/pdf` organizes the uploaded PDF into the Profile's structure for the user to review.
+   It stores nothing: the PDF, its text and the result exist only during the request.
+2. `GET /api/v1/profile/import` says whether the account can still import (`available`, `importedAt`) and returns
+   the current Profile with its `revision`, which the review starts from.
+3. `POST /api/v1/profile/import` saves the Profile the user reviewed and confirmed, and uses up the import.
+
+No saved CV is created or changed. A CV made from the Profile later is an independent copy, so later Profile edits
+never change existing CVs or tailored CVs.
+
+**Extraction request.** Refused with 409 once the account has imported, before the consent and file checks, so
+it never costs an AI call or a quota unit. The body is the PDF itself with `Content-Type: application/pdf`. The request must carry the header
 `X-FlowJob-AI-Consent: cv-import`, which the app sends only after the user agrees that the CV text is sent to
 OpenAI to organize it; without it the API answers 428. The user must be signed in.
 
@@ -102,9 +110,26 @@ entry. Every value left out is listed in `warnings` with a reason, and empty fie
 **Cancelled requests.** The quota reservation and the AI call run in their own task, shielded from the request (as
 in Match and Tailor), so a disconnected client cannot have a billed call refunded.
 
-**Response.** `{content, warnings, missing, source: {pages, method}, model}`, where `content` has the same shape as
-`CvContent` and can be sent to `POST /api/v1/cvs` after review. The response is marked `Cache-Control: no-store`.
-Logs contain only fixed error codes, never CV text.
+**Extraction response.** `{content, warnings, missing, source: {pages, method}, model}`, where `content` has the
+Profile's shape (`CvContent`). The response is marked `Cache-Control: no-store`. Logs contain only fixed error codes,
+never CV text.
+
+**Saving to the Profile.** The body is `{profile, revision, requestId}`: the reviewed Profile, the `revision` from
+`GET /api/v1/profile/import` the review was based on, and an id the browser keeps for every retry of one save. The
+Profile is validated with the CV limits and link rules. The account name and email (or the name and email the user
+set in the Profile) always replace the PDF's. The answer is the saved Profile, as `GET /api/v1/profile` returns it.
+
+- **Once per account.** The import is recorded as `cv_import` (`saved_at`, `request_id`) in the user's `profiles`
+  document, by the same single update that writes the Profile. That update applies only to a document without the
+  marker that still holds the Profile the user reviewed. So of several saves at once exactly one succeeds and the
+  others get 409, and only a successful save uses up the import: failed or cancelled extractions, discarded reviews
+  and skipping onboarding do not. A retry with the same `requestId` after a lost answer gets 200 again.
+- **No stale overwrites.** If the Profile changed after the review started (another tab, or an account name or email
+  change), the save answers 412 and writes nothing; the review must start again from the current Profile.
+- **Protected marker.** `Profile.cv_import` is declared with `exclude=True`, so Beanie's whole-document saves (Profile
+  saves and account edits) can neither write nor erase it, and no response includes it. Profile edits stay unlimited.
+- **Support reset.** To let an account import again, remove the marker in MongoDB:
+  `db.profiles.updateOne({user_id: ObjectId("<user id>")}, {$unset: {cv_import: ""}})`. The Profile is unchanged.
 
 ## Authentication and deployment
 
