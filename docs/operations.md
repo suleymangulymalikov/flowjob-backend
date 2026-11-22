@@ -76,15 +76,27 @@ default 5 per user per UTC day, also counted toward `AI_GLOBAL_DAILY_QUOTA`), an
 into fields (`IMPORT_MAX_OUTPUT_TOKENS` 8000, `IMPORT_TIMEOUT_SECONDS` 90). A failed call refunds the unit; a file
 rejected before the call never uses one. Typical cost is about $0.02–0.04 per import at the default prices.
 
-**Checks against the PDF text.** The model is told to copy values exactly, and the backend keeps only values it
-finds in the extracted text: names, contact details, job titles, employers, schools, degrees, dates, bullet points,
-projects, skills and languages. Matching tolerates differences that come from PDF extraction (line breaks,
-whitespace, ligatures, curly quotes, dash styles, bullet symbols, words hyphenated across a line break) but not
-changed wording, numbers or capitalization, and words must match whole. Dates must be written next to their own
-entry and bullet points under their own entry, so nothing moves between jobs. A phone number is returned as the CV
-writes it. Only unambiguous month formats such as `Jan 2020` or `01/2020` are converted to `2020-01`; anything else
-is kept as written, and `Present` marks an ongoing entry. Every value left out is listed in `warnings` with a
-reason, and empty fields are listed in `missing`.
+**Checks against the PDF text.** pypdf extracts the text twice: in reading order, and in visual layout where each
+printed line is kept together (multi-column CVs often print dates on the right of each job, which reading order
+separates from the job). Both versions go to the model and to the checks. The model is told to copy values exactly,
+and the backend keeps only values it finds in the extracted text: names, contact details, job titles, employers,
+schools, degrees, dates, bullet points, projects, skills and languages. Matching tolerates differences that come
+from PDF extraction (line breaks, whitespace, ligatures, curly quotes, dash styles, bullet symbols, and words
+hyphenated across a line break, whether or not the word itself has a hyphen) but not changed wording, numbers or
+capitalization; hyphens next to digits always count, and words must match whole.
+
+Each job, school and project is located at its own heading, where its title and organization appear on the same or
+adjacent lines; other mentions of the same company elsewhere in the CV do not count, so several positions at one
+employer stay separate. Bullet points, notes and descriptions are kept only when they are written in their own
+entry's region, which ends at the next entry or section heading (Skills, Hobbies, References and similar, in English
+and Polish); text before the first entry or in other sections is never attached to an entry. Dates must be written
+at their own entry's heading (after it, or directly before it in CVs that print dates first; in the layout version,
+on the heading's own line). A phone number is returned as the CV writes it. Only unambiguous month formats such as
+`Jan 2020` or `01/2020` are converted to `2020-01`; anything else is kept as written, and `Present` marks an ongoing
+entry. Every value left out is listed in `warnings` with a reason, and empty fields are listed in `missing`.
+
+**Cancelled requests.** The quota reservation and the AI call run in their own task, shielded from the request (as
+in Match and Tailor), so a disconnected client cannot have a billed call refunded.
 
 **Response.** `{content, warnings, missing, source: {pages, method}, model}`, where `content` has the same shape as
 `CvContent` and can be sent to `POST /api/v1/cvs` after review. The response is marked `Cache-Control: no-store`.

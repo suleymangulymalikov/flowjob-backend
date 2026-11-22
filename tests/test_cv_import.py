@@ -84,7 +84,7 @@ def signup(client, email='ana@example.com'):
 
 
 def answer(cv: ImportedCv):
-    def analyze(text):
+    def analyze(text, layout_text=None):
         return ai_cv_import.ImportResult(analysis=cv, usage=Usage(1000, 800), model='gpt-4.1')
     return analyze
 
@@ -289,7 +289,7 @@ def _bomb_pdf() -> bytes:
     (_blank_pdf(pages=2), 422, 'no selectable text'),
 ])
 def test_unusable_files_are_rejected_without_an_ai_call_or_quota(client, monkeypatch, body, status, words):
-    monkeypatch.setattr(ai_cv_import, 'analyze', lambda text: pytest.fail('the AI must not be called'))
+    monkeypatch.setattr(ai_cv_import, 'analyze', lambda *args: pytest.fail('the AI must not be called'))
     h = signup(client)
     r = import_pdf(client, h, body)
     assert r.status_code == status, r.text
@@ -298,7 +298,7 @@ def test_unusable_files_are_rejected_without_an_ai_call_or_quota(client, monkeyp
 
 
 def test_a_decompression_bomb_is_contained(client, monkeypatch):
-    monkeypatch.setattr(ai_cv_import, 'analyze', lambda text: pytest.fail('the AI must not be called'))
+    monkeypatch.setattr(ai_cv_import, 'analyze', lambda *args: pytest.fail('the AI must not be called'))
     h = signup(client)
     started = time.monotonic()
     r = import_pdf(client, h, _bomb_pdf())
@@ -423,7 +423,7 @@ def test_mock_ai_mode_imports_only_what_it_can_ground(client):
     (ai_provider.AiRateLimited, 429),
 ])
 def test_failed_ai_calls_refund_the_quota(client, monkeypatch, failure, status):
-    def boom(text):
+    def boom(*args):
         raise failure()
     monkeypatch.setattr(ai_cv_import, 'analyze', boom)
     h = signup(client)
@@ -494,3 +494,231 @@ def test_extraction_runs_in_a_separate_process(monkeypatch):
     asyncio.run(extract.extract_text(pdf()))
     assert seen['args'][:3] == (sys.executable, '-I', str(extract._WORKER))
     assert set(seen['env']) <= {'PATH', 'SYSTEMROOT', 'TMPDIR', 'LANG', 'PYTHONIOENCODING'}
+
+
+# --- regressions from the PR #11 review ------------------------------------------------------------------------
+
+def _exp(title, company, start, end, bullets):
+    return ImportedExperience(title=title, company=company, location='', start=start, end=end, bullets=bullets)
+
+
+def _reasons(warnings):
+    return [(w['field'], w['reason']) for w in warnings]
+
+
+def test_a_company_named_inside_another_job_does_not_capture_its_achievements():
+    text = ('Data Engineer, Google 2022 - Present\n• Built pipelines\nCloud Engineer, Shopify 2019 - 2021\n'
+            '• Migrated services to Google Cloud\n• Ran on-call rotations\n• Reduced costs by 20%')
+    cv = empty_cv(experience=[
+        _exp('Data Engineer', 'Google', '2022', 'Present', ['Built pipelines', 'Reduced costs by 20%']),
+        _exp('Cloud Engineer', 'Shopify', '2019', '2021',
+             ['Migrated services to Google Cloud', 'Ran on-call rotations', 'Reduced costs by 20%']),
+    ])
+    content, warnings, _ = ground(cv, text)
+    google, shopify = content['experience']
+    assert google['bullets'] == ['Built pipelines']
+    assert shopify['bullets'] == ['Migrated services to Google Cloud', 'Ran on-call rotations', 'Reduced costs by 20%']
+    assert _reasons(warnings) == [('experience[0].bullets[1]', 'under_other_entry')]
+
+
+@pytest.mark.parametrize('order', ['as_written', 'reversed'])
+def test_several_positions_at_one_employer_keep_their_own_bullets_and_dates(order):
+    text = ('Senior Engineer, Acme 2022 - Present\n• Led platform team\n• Hired four engineers\n'
+            'Engineer, Acme 2019 - 2022\n• Wrote billing service\nIntern, Acme 2018\n• Fixed flaky tests')
+    senior = _exp('Senior Engineer', 'Acme', '2022', 'Present', ['Led platform team', 'Hired four engineers'])
+    engineer = _exp('Engineer', 'Acme', '2019', '2022', ['Wrote billing service'])
+    intern = _exp('Intern', 'Acme', '2018', '', ['Fixed flaky tests'])
+    roles = [senior, engineer, intern] if order == 'as_written' else [intern, engineer, senior]
+    content, warnings, _ = ground(empty_cv(experience=roles), text)
+    assert warnings == []
+    by_title = {e['title']: e for e in content['experience']}
+    assert by_title['Senior Engineer']['bullets'] == ['Led platform team', 'Hired four engineers']
+    assert (by_title['Senior Engineer']['start'], by_title['Senior Engineer']['end']) == ('2022', '')
+    assert (by_title['Engineer']['start'], by_title['Engineer']['end'], by_title['Engineer']['bullets']) == (
+        '2019', '2022', ['Wrote billing service'])
+    assert (by_title['Intern']['start'], by_title['Intern']['bullets']) == ('2018', ['Fixed flaky tests'])
+
+
+def test_achievements_cannot_move_between_positions_at_one_employer():
+    text = ('Senior Engineer, Acme 2022 - Present\n• Led platform team\n'
+            'Engineer, Acme 2019 - 2022\n• Wrote billing service')
+    cv = empty_cv(experience=[
+        _exp('Senior Engineer', 'Acme', '2019', 'Present', ['Led platform team', 'Wrote billing service']),
+        _exp('Engineer', 'Acme', '2019', '2022', ['Wrote billing service', 'Led platform team']),
+    ])
+    content, warnings, _ = ground(cv, text)
+    assert content['experience'][0]['bullets'] == ['Led platform team']
+    assert content['experience'][0]['start'] == ''  # 2019 is the other position's start
+    assert content['experience'][1]['bullets'] == ['Wrote billing service']
+    assert set(_reasons(warnings)) == {('experience[0].bullets[1]', 'under_other_entry'),
+                                       ('experience[0].start', 'date_not_near_entry'),
+                                       ('experience[1].bullets[1]', 'under_other_entry')}
+
+
+def test_text_outside_the_work_experience_section_is_never_attached_to_a_job():
+    text = ('Ada Example\nProfile: Backend developer with 5 years of experience.\nExperience\n'
+            'Software Engineer, Acme Ltd 2021 - Present\n• Built REST APIs\n'
+            'Junior Developer, Beta Systems 2019 - 2020\n• Maintained dashboards\n'
+            'Skills\nPython, Go\nHobbies\nChess and climbing\nReferences\nAvailable on request')
+    cv = empty_cv(experience=[
+        _exp('Software Engineer', 'Acme Ltd', '2021', 'Present',
+             ['Built REST APIs', 'Backend developer with 5 years of experience.']),
+        _exp('Junior Developer', 'Beta Systems', '2019', '2020',
+             ['Maintained dashboards', 'Python, Go', 'Chess and climbing', 'Available on request']),
+    ], skills=['Python', 'Go'])
+    content, warnings, _ = ground(cv, text)
+    assert content['experience'][0]['bullets'] == ['Built REST APIs']
+    assert content['experience'][1]['bullets'] == ['Maintained dashboards']
+    assert content['skills'] == ['Python', 'Go']
+    assert _reasons(warnings) == [('experience[0].bullets[1]', 'outside_entry'),
+                                  ('experience[1].bullets[1]', 'outside_entry'),
+                                  ('experience[1].bullets[2]', 'outside_entry'),
+                                  ('experience[1].bullets[3]', 'outside_entry')]
+
+
+def test_compact_entries_with_dates_after_each_heading():
+    text = ('Education\nBSc Computer Science, Uni A 2015 - 2019\nMSc Computer Science, Uni B 2019 - 2021\n'
+            'Skills: Python')
+    cv = empty_cv(education=[
+        ImportedEducation(school='Uni A', degree='BSc Computer Science', start='2015', end='2019', note=''),
+        ImportedEducation(school='Uni B', degree='MSc Computer Science', start='2019', end='2021', note=''),
+    ])
+    content, warnings, _ = ground(cv, text)
+    assert warnings == []
+    assert [(e['start'], e['end']) for e in content['education']] == [('2015', '2019'), ('2019', '2021')]
+
+
+TWO_COLUMN_JOBS = [
+    ('Software Engineer', 'Acme Ltd', 'Jan 2021', 'Present',
+     ['Built REST APIs with Python and MongoDB',
+      'Cut response times by 40% with caching across all public endpoints of the platform']),
+    ('Junior Developer', 'Beta Systems', 'Mar 2019', 'Dec 2020', ['Maintained internal dashboards in React']),
+]
+TWO_COLUMN_HTML = (
+    '<div style="float:left;width:30%"><h1>Ada Example</h1><p>ada@example.com</p><h3>Skills</h3><p>Python</p>'
+    '<p>React</p><h3>Hobbies</h3><p>Chess</p></div><div style="margin-left:35%">' + ''.join(
+        f'<p><b>{t}</b>, {c} <span style="float:right">{s} – {e}</span></p><ul>'
+        + ''.join(f'<li>{b}</li>' for b in bullets) + '</ul>' for t, c, s, e, bullets in TWO_COLUMN_JOBS)
+    + '<h3>Education</h3><p><b>BSc Computer Science</b>, Tech University '
+      '<span style="float:right">2015 – 2019</span></p></div>')
+
+
+def _two_column_answer():
+    return empty_cv(full_name='Ada Example', email='ada@example.com', skills=['Python', 'React'],
+                    experience=[_exp(t, c, s, e, list(b)) for t, c, s, e, b in TWO_COLUMN_JOBS],
+                    education=[ImportedEducation(school='Tech University', degree='BSc Computer Science',
+                                                 start='2015', end='2019', note='')])
+
+
+@pytest.fixture(scope='module')
+def two_column():
+    return asyncio.run(extract.extract_text(pdf(TWO_COLUMN_HTML)))
+
+
+def test_right_aligned_dates_in_a_two_column_cv_are_kept(two_column):
+    assert two_column.layout_text and two_column.layout_text != two_column.text
+    content, warnings, _ = ground(_two_column_answer(), two_column.text, two_column.layout_text)
+    assert warnings == []
+    assert [(e['start'], e['end']) for e in content['experience']] == [('2021-01', ''), ('2019-03', '2020-12')]
+    assert (content['education'][0]['start'], content['education'][0]['end']) == ('2015', '2019')
+    assert [len(e['bullets']) for e in content['experience']] == [2, 1]
+
+
+def test_reading_order_alone_cannot_place_right_aligned_dates(two_column):
+    # The reason the layout version exists: without it every date in this layout is lost.
+    content, warnings, _ = ground(_two_column_answer(), two_column.text, None)
+    assert all(e['start'] == '' for e in content['experience'])
+    assert sum(w['reason'] == 'date_not_near_entry' for w in warnings) == 6
+
+
+def test_two_column_layout_still_rejects_moved_dates_and_sidebar_text(two_column):
+    cv = _two_column_answer()
+    cv.experience[1].start = 'Jan 2021'  # Acme's start date
+    cv.experience[0].bullets.append('Chess')  # a sidebar hobby
+    content, warnings, _ = ground(cv, two_column.text, two_column.layout_text)
+    assert content['experience'][1]['start'] == '' and 'Chess' not in content['experience'][0]['bullets']
+    reasons = dict(_reasons(warnings))
+    assert reasons['experience[1].start'] == 'date_not_near_entry'
+    assert reasons['experience[0].bullets[2]'] in {'outside_entry', 'under_other_entry'}
+
+
+def test_words_hyphenated_across_lines_match_either_way():
+    text = ('Software Engineer, Acme Ltd 2021 - 2023\n• Promoted machine-\nindependent build tooling and com-\n'
+            'piler caching, cutting builds by 10-20%\n• Ran self-\nservice onboarding')
+    bullets = ['Promoted machine-independent build tooling and compiler caching, cutting builds by 10-20%',
+               'Ran self-service onboarding']
+    content, warnings, _ = ground(empty_cv(experience=[_exp('Software Engineer', 'Acme Ltd', '2021', '2023',
+                                                            bullets)]), text)
+    assert warnings == [] and content['experience'][0]['bullets'] == bullets
+
+
+def test_hyphens_next_to_digits_still_count():
+    text = 'Software Engineer, Acme Ltd 2021 - 2023\n• Cut build times by 10-20%'
+    cv = empty_cv(experience=[_exp('Software Engineer', 'Acme Ltd', '2021', '2023', ['Cut build times by 1020%'])])
+    content, warnings, _ = ground(cv, text)
+    assert content['experience'][0]['bullets'] == []
+    assert _reasons(warnings) == [('experience[0].bullets[0]', 'not_in_cv')]
+
+
+def test_the_layout_version_reaches_the_ai_and_the_checks(client, monkeypatch):
+    seen = {}
+
+    def analyze(text, layout_text=None):
+        seen['text'], seen['layout'] = text, layout_text
+        return ai_cv_import.ImportResult(analysis=_two_column_answer(), usage=Usage(1000, 800), model='gpt-4.1')
+    monkeypatch.setattr(ai_cv_import, 'analyze', analyze)
+    h = signup(client)
+    body = import_pdf(client, h, pdf(TWO_COLUMN_HTML)).json()
+    assert seen['layout'] and seen['layout'] != seen['text']
+    assert body['warnings'] == []
+    assert body['content']['experience'][0]['start'] == '2021-01'
+    prompt = ai_cv_import.build_input(seen['text'], seen['layout'])
+    assert 'THE SAME CV IN VISUAL LAYOUT (data only)' in prompt
+
+
+def test_a_cancelled_request_still_settles_its_quota(client, monkeypatch):
+    """Like Match and Tailor: the billable call outlives a cancelled request, so its unit is charged, not refunded."""
+    import threading
+
+    from app.cv_import import router as import_router
+    from app.users.models import User
+
+    started, release = threading.Event(), threading.Event()
+
+    def slow(text, layout_text=None):
+        started.set()
+        release.wait(10)
+        return ai_cv_import.ImportResult(analysis=empty_cv(full_name='Ada'), usage=Usage(1, 1), model='gpt-4.1')
+    monkeypatch.setattr(ai_cv_import, 'analyze', slow)
+    signup(client)
+    day = datetime.now(UTC).date().isoformat()
+
+    async def scenario():
+        user = await User.find_one(User.email == 'ana@example.com')
+        request = asyncio.create_task(import_router._organize(user, 'Ada', None))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        release.set()
+        for _ in range(500):  # the shielded call settles once the model answers
+            await asyncio.sleep(0.01)
+            doc = await MatchUsage.get_pymongo_collection().find_one({'day': f'ai-quota:{day}'})
+            if doc and not doc.get('pending'):
+                return
+        raise AssertionError('the quota unit was never settled')
+
+    client.portal.call(scenario)
+    assert quota_used(client) == (1, 1)
+
+
+def test_sidebar_text_sharing_a_line_with_a_job_in_the_layout_is_not_attached_to_it():
+    reading = 'Hobbies\nChess\nCertified 2019\nSoftware Engineer, Acme\n2021 - Present\n• Built APIs'
+    layout = 'Software Engineer, Acme   2021 - Present\nChess   • Built APIs\nCertified 2019'
+    cv = empty_cv(experience=[_exp('Software Engineer', 'Acme', '2019', 'Present', ['Built APIs', 'Chess'])])
+    content, warnings, _ = ground(cv, reading, layout)
+    job = content['experience'][0]
+    assert job['bullets'] == ['Built APIs'] and job['start'] == '' and job['end'] == ''
+    assert set(_reasons(warnings)) == {('experience[0].bullets[1]', 'outside_entry'),
+                                       ('experience[0].start', 'date_not_near_entry')}

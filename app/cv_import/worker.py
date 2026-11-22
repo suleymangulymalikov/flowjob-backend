@@ -1,7 +1,9 @@
 """Isolated PDF text extraction. Runs as its own process: `python -I worker.py <max_pages> <max_chars> <cpu> <memory>`.
 
 The parent (app/cv_import/extract.py) writes the PDF to stdin and reads one JSON object from stdout:
-{"ok": true, "pages": n, "text": "..."} or {"ok": false, "code": "<reason>"}.
+{"ok": true, "pages": n, "text": "...", "layout": "..." | null} or {"ok": false, "code": "<reason>"}.
+`text` is pypdf's reading order; `layout` keeps each visual line together (so a right-aligned date stays on its job's
+line). The layout version is optional: if it cannot be produced within its budget, it is null.
 
 Untrusted PDFs are parsed here, never in the API process: the process gets a CPU-time limit, a memory limit (where
 the OS supports one), no permission to write files, a minimal environment without credentials, and the parent kills
@@ -11,8 +13,11 @@ Errors are reported as fixed codes; parser messages are never passed on, so no P
 
 import io
 import json
+import re
 import resource
 import sys
+
+_SPACES = re.compile(r' {3,}')
 
 
 def _limit(cpu_seconds: int, memory_bytes: int) -> None:
@@ -65,11 +70,28 @@ def main() -> None:
             if total > max_chars:
                 return _fail('too_much_text')
             parts.append(text)
+        layout = _layout(reader, max_chars * 2)
     except MemoryError:
         return _fail('too_complex')
     except Exception:  # noqa: BLE001 - a malformed PDF can raise anything; only a fixed code leaves this process
         return _fail('unreadable')
-    _emit({'ok': True, 'pages': pages, 'text': '\n\n'.join(parts)})
+    _emit({'ok': True, 'pages': pages, 'text': '\n\n'.join(parts), 'layout': layout})
+
+
+def _layout(reader, budget: int) -> str | None:
+    """Visual-line text, with runs of padding spaces shortened. None when it fails or exceeds `budget`."""
+    pages, total = [], 0
+    try:
+        for page in reader.pages:
+            text = '\n'.join(_SPACES.sub('   ', line).rstrip()
+                             for line in (page.extract_text(extraction_mode='layout') or '').splitlines())
+            total += len(text)
+            if total > budget:
+                return None
+            pages.append(text)
+    except Exception:  # noqa: BLE001 - the reading-order text is enough on its own
+        return None
+    return '\n\n'.join(pages)
 
 
 if __name__ == '__main__':

@@ -6,8 +6,13 @@ later, and only through POST /api/v1/cvs after the user confirms it.
 Order of work, so failures never cost an AI call or a quota unit:
 consent and file checks -> bounded text extraction -> reserve one `import` quota unit -> one AI call (refunded if it
 fails) -> grounding checks against the extracted text -> CvContent validation.
+
+The quota reservation and the AI call run in their own task, shielded from the request (the pattern Match and Tailor
+use via coalesce_request): if the client disconnects or the request is cancelled, the billable call still settles its
+quota unit instead of refunding it.
 """
 
+import asyncio
 import logging
 from typing import Annotated
 
@@ -41,6 +46,27 @@ router = APIRouter(prefix='/api/v1', tags=['cv-import'], route_class=ImportPaylo
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+async def _organize(user: User, text: str, layout_text: str | None) -> ai_cv_import.ImportResult:
+    """Reserve one quota unit and make the AI call in a task that outlives a cancelled request."""
+
+    async def generate() -> ai_cv_import.ImportResult:
+        async with generation_quota(user.id, 'import'):
+            try:
+                # The billable call runs off the event loop. Tests replace ai_cv_import.analyze.
+                return await run_in_threadpool(ai_cv_import.analyze, text, layout_text)
+            except AiError as error:
+                status, message = error_response(error)
+                raise HTTPException(status, message) from None  # leaving the block refunds the quota unit
+
+    def observe(task: asyncio.Task) -> None:
+        if not task.cancelled():
+            task.exception()  # a disconnected client may no longer be awaiting this result
+
+    task = asyncio.create_task(generate())
+    task.add_done_callback(observe)
+    return await asyncio.shield(task)
+
+
 @router.post('/cvs/import')
 async def import_cv(
     request: Request,
@@ -61,15 +87,9 @@ async def import_cv(
         _log.info('CV import rejected the file: %s', error.code)  # a fixed code, never file content
         raise HTTPException(error.status, error.message) from None
 
-    async with generation_quota(user.id, 'import'):
-        try:
-            # The billable call runs off the event loop. Tests replace ai_cv_import.analyze.
-            result = await run_in_threadpool(ai_cv_import.analyze, extracted.text)
-        except AiError as error:
-            status, message = error_response(error)
-            raise HTTPException(status, message) from None  # leaving the block refunds the quota unit
+    result = await _organize(user, extracted.text, extracted.layout_text)
 
-    content, warnings, missing = ground(result.analysis, extracted.text)
+    content, warnings, missing = ground(result.analysis, extracted.text, extracted.layout_text)
     try:
         validated = CvContent.model_validate(content).model_dump()
     except (ValidationError, CvWorkloadError):

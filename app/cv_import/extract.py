@@ -62,9 +62,10 @@ class ImportFileError(Exception):
 
 @dataclass(frozen=True)
 class ExtractedText:
-    text: str
+    text: str  # reading order
     pages: int
     method: str  # 'pdf-text' (selectable text). An OCR method can be added later for scanned PDFs.
+    layout_text: str | None = None  # the same text kept in visual lines (multi-column CVs), when available
 
 
 def _worker_env() -> dict[str, str]:
@@ -129,10 +130,11 @@ async def extract_text(data: bytes) -> ExtractedText:
     if not result.get('ok'):
         code = result.get('code')
         raise ImportFileError(code if code in ERRORS else 'unreadable')
-    text, pages = result.get('text'), result.get('pages')
+    text, pages, layout = result.get('text'), result.get('pages'), result.get('layout')
     if not isinstance(text, str) or not isinstance(pages, int):
         raise ImportFileError('unreadable')
     text = _clean(text)
     if sum(ch.isalnum() for ch in text) < MIN_TEXT_CHARS:
         raise ImportFileError('no_text')
-    return ExtractedText(text=text, pages=pages, method='pdf-text')
+    layout = _clean(layout) if isinstance(layout, str) else None
+    return ExtractedText(text=text, pages=pages, method='pdf-text', layout_text=layout or None)
