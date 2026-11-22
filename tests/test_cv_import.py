@@ -615,10 +615,27 @@ def two_column():
     return asyncio.run(extract.extract_text(pdf(TWO_COLUMN_HTML)))
 
 
+def _layout_report(html: str, extracted) -> str:
+    """What pypdf saw, for a failing layout assertion: each text run's baseline, x, font and size, and both texts.
+    The PDFs are synthetic, so printing them is safe; it shows how a platform's fonts placed the text."""
+    from pypdf import PdfReader
+
+    runs = []
+
+    def visit(text, cm, tm, font, size):
+        if text.strip():
+            x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            runs.append(f'y={y:8.2f} x={x:6.1f} {(font or {}).get("/BaseFont")} {size:g}: {text.strip()[:40]}')
+    PdfReader(io.BytesIO(pdf(html))).pages[0].extract_text(visitor_text=visit)
+    return ('\nRUNS:\n' + '\n'.join(sorted(runs, key=lambda r: -float(r[2:10]))) + '\nREADING ORDER:\n'
+            + extracted.text + '\nLAYOUT:\n' + (extracted.layout_text or '<none>'))
+
+
 def test_right_aligned_dates_in_a_two_column_cv_are_kept(two_column):
     assert two_column.layout_text and two_column.layout_text != two_column.text
     content, warnings, _ = ground(_two_column_answer(), two_column.text, two_column.layout_text)
-    assert warnings == []
+    assert warnings == [], _layout_report(TWO_COLUMN_HTML, two_column)
     assert [(e['start'], e['end']) for e in content['experience']] == [('2021-01', ''), ('2019-03', '2020-12')]
     assert (content['education'][0]['start'], content['education'][0]['end']) == ('2015', '2019')
     assert [len(e['bullets']) for e in content['experience']] == [2, 1]
