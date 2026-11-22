@@ -11,8 +11,17 @@ Other mentions of the same company or title elsewhere do not count, and a shorte
 within "Senior Engineer") belongs to the longer one, so two roles at one employer stay apart. An entry's region runs
 from its heading to the next entry heading, the next section heading (Skills, Hobbies, References, ...) or a maximum
 length, whichever comes first. A bullet point, note or description is kept only when it is written inside its own
-entry's region, and a date only when it is written at its own entry's heading (after it, or directly before it in CVs
-that print dates first). Text before the first entry (a summary or profile) or in another section is never attached
+entry's region.
+
+Dates. A date belongs to the entry whose heading it is written at, judged in the visual layout whenever pypdf can
+produce one (its lines and columns show which heading a date sits beside; reading order can merge a sidebar into a
+heading's line): on the heading's own line(s), inside the heading's text or in a date-only column at or right of the
+heading, or on a date-only line directly above or below the heading (a right-aligned date pushed onto its own line by
+a narrow column or a wide font). A date-only column left of the heading (a sidebar year) never counts. A date line
+between two headings is assigned only when the rest of the CV shows whether it prints dates after or before headings;
+otherwise it is ambiguous and left out. Without a layout version, reading order is used: after the heading within
+its region, or a date-only line directly before the heading; a block of date-only lines printed apart from the
+entries is never assigned. Text before the first entry (a summary or profile) or in another section is never attached
 to an entry. Anything that fails is left out and reported as a warning; nothing is corrected or filled in.
 
 The text is checked in several forms: reading order and visual layout (pypdf's two modes, which differ for
@@ -44,6 +53,12 @@ _TYPOGRAPHY = str.maketrans({
 })
 _MARKER = re.compile(r'^\s*(?:[-*•–—·▪●◦‣⁃■►➢]|\d{1,2}[.)])\s+')
 _HYPHEN_BREAK = re.compile(r'(\w)([-‐­])[ \t]*\n\s*(\w)')
+# Words that may appear in a line holding only dates: month names and "present"-like words (English and Polish).
+_DATE_WORDS = re.compile(
+    r'\b(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|'
+    r'october|nov|november|dec|december|present|current|currently|now|today|ongoing|to|date|till|until|since|'
+    r'sty|stycze[nń]|lut|luty|marz|marzec|kwi|kwiecie[nń]|maj|cze|czerwiec|lip|lipiec|sie|sierpie[nń]|wrz|'
+    r'wrzesie[nń]|pa[zź]|pa[zź]dziernik|lis|listopad|gru|grudzie[nń]|obecnie|teraz|od|do)\b\.?', re.IGNORECASE)
 _WORD_HYPHEN = re.compile(r'(?<=[^\W\d_])-(?=[^\W\d_])')  # a hyphen between two letters, never next to a digit
 _EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 _PHONE = re.compile(r'\+?\(?\d[\d\s().\-/]{5,}\d')
@@ -81,6 +96,7 @@ MESSAGES = {
     'not_in_cv': 'Not found in your CV, so it was left out.',
     'entry_not_in_cv': 'This entry could not be found in your CV, so it was left out.',
     'date_not_near_entry': 'This date was not found next to this entry in your CV, so it was left out.',
+    'date_ambiguous': 'This date could belong to more than one entry in your CV, so it was left out.',
     'under_other_entry': 'This text appears under a different entry in your CV, so it was left out.',
     'outside_entry': 'This text is not part of this entry in your CV, so it was left out.',
     'unsafe_link': 'This link uses an unsafe address, so it was left out.',
@@ -105,6 +121,20 @@ def _short(value: str) -> str:
     return value if len(value) <= 160 else value[:157] + '...'
 
 
+def _only_dates(text: str) -> bool:
+    """Whether a line or column holds nothing but dates ("Jan 2021 - Present", "09/2018 - 06/2020", "2019")."""
+    rest = _DATE_WORDS.sub(' ', fold(text))
+    return any(ch.isdigit() for ch in text) and not any(ch.isalnum() and not ch.isdigit() for ch in rest)
+
+
+def _heading_text_with_dates(part: str, names: tuple[str, ...]) -> bool:
+    """Whether a line's column holds dates plus words of the entry's own heading (a heading that wrapped onto the
+    date's line, such as "Technology - 2015 - 2019"), and nothing else."""
+    words = re.findall(r'[^\W\d_]+', _DATE_WORDS.sub(' ', part))
+    own = {word for name in names for word in re.findall(r'[^\W\d_]+', name)}
+    return any(ch.isdigit() for ch in part) and bool(words) and all(word in own for word in words)
+
+
 def _is_heading(line: str) -> bool:
     text = _MARKER.sub('', line).strip().casefold()
     if text.rstrip(':').strip() in _HEADINGS:
@@ -121,13 +151,19 @@ class Form:
     lines: list[int] = field(default_factory=list)  # where every line starts
     word_hyphens_ignored: bool = False  # this form, and needles searched in it, drop hyphens between letters
     layout: bool = False  # visual-line text, where a sidebar can share lines with the main column
+    raw_lines: list[str] = field(default_factory=list)  # each line before folding (keeps column gaps)
 
     def line_of(self, position: int) -> int:
         return bisect_right(self.lines, position) - 1
 
+    def segments(self, line: int) -> list[tuple[int, str]]:
+        """The parts of a line separated by wide gaps, with the column each starts at: in visual-layout text, the
+        page columns sharing that line, from left to right."""
+        return [(match.start(), match.group(0)) for match in re.finditer(r'\S+(?:\s{1,2}\S+)*', self.raw_lines[line])]
+
 
 def _form(raw: str, *, ignore_word_hyphens: bool = False) -> Form:
-    parts, headings, lines, position = [], [], [], 0
+    parts, headings, lines, raw_lines, position = [], [], [], [], 0
     for line in raw.splitlines():
         folded = fold(line)
         if ignore_word_hyphens:
@@ -137,11 +173,12 @@ def _form(raw: str, *, ignore_word_hyphens: bool = False) -> Form:
         if parts:
             position += 1  # the joining space
         lines.append(position)
+        raw_lines.append(line)
         if _is_heading(folded):
             headings.append(position)
         parts.append(folded)
         position += len(folded)
-    return Form(' '.join(parts), headings, lines, ignore_word_hyphens)
+    return Form(' '.join(parts), headings, lines, ignore_word_hyphens, raw_lines=raw_lines)
 
 
 def _forms(raw: str, *, layout: bool = False) -> list[Form]:
@@ -205,7 +242,9 @@ class Grounder:
         self.warnings: list[dict[str, str]] = []
         self.headers: list[dict[str, int]] = [{} for _ in self.source.forms]  # per form: entry key -> heading position
         self.heading_lines: list[dict[str, tuple[int, int]]] = [{} for _ in self.source.forms]  # first, last line
+        self.heading_columns: list[dict[str, int]] = [{} for _ in self.source.forms]  # layout: where a heading starts
         self.entry_dates: dict[str, list[str]] = {}
+        self.entry_names: dict[str, tuple[str, ...]] = {}
 
     # --- reporting -----------------------------------------------------------------------------------------------
     def warn(self, field: str, value: str, reason: str) -> None:
@@ -289,6 +328,7 @@ class Grounder:
     def locate(self, entries: list[Entry]) -> None:
         """Find each entry's own heading in every form (see the module docstring)."""
         self.entry_dates = {entry.key: entry.dates for entry in entries}
+        self.entry_names = {entry.key: tuple(name for name in (entry.main, entry.org) if name) for entry in entries}
         names = {name for entry in entries for name in (entry.main, entry.org) if name}
         for form in range(len(self.source.forms)):
             occurrences = {name: self.source.positions(name, form) for name in names}
@@ -308,14 +348,15 @@ class Grounder:
                 secondary = entry.main if entry.org and entry.main else ''
                 candidates = []
                 for position in standalone(primary):
-                    heading, last, score = position, position, 0
+                    heading, last, score = position, position + len(primary) - 1, 0
                     if secondary:
                         # The title and organization of one heading are on the same line or adjacent lines.
                         near = [p for p in standalone(secondary)
                                 if abs(line_of(p) - line_of(position)) <= 1 and abs(p - position) <= HEADER_WINDOW]
                         if near:
                             closest = min(near, key=lambda p: abs(p - position))
-                            heading, last, score = min(position, closest), max(position, closest), 2
+                            heading, score = min(position, closest), 2
+                            last = max(position + len(primary), closest + len(secondary)) - 1
                     for hint in entry.hints:
                         spots = self.source.positions(hint, form)
                         if any(abs(spot - heading) <= HEADER_WINDOW for spot in spots):
@@ -332,6 +373,12 @@ class Grounder:
                 previous[entry.section] = heading
                 self.headers[form][entry.key] = heading
                 self.heading_lines[form][entry.key] = (line_of(heading), line_of(last))
+                if self.source.forms[form].layout:
+                    columns = [column for line in range(line_of(heading), line_of(last) + 1)
+                               for column, part in self.source.forms[form].segments(line)
+                               if any(name in fold(part) for name in (entry.main, entry.org) if name)]
+                    if columns:
+                        self.heading_columns[form][entry.key] = min(columns)
 
     def _region(self, form: int, key: str) -> tuple[int, int] | None:
         heading = self.headers[form].get(key)
@@ -353,41 +400,71 @@ class Grounder:
         return [(form, position) for form in range(len(self.source.forms))
                 for position in self.source.positions(needle, form)]
 
-    def _dated_after_heading(self, form: int, key: str) -> bool:
-        """Whether this CV prints this entry's dates after its heading (then a date just before the heading is the
-        previous entry's)."""
-        region = self._region(form, key)
-        if region is None:
-            return False
-        heading, region_end = region
-        limit = min(region_end, heading + HEADER_WINDOW)
-        headings = sorted(self.headers[form].values())
-        for date in self.entry_dates.get(key, []):
-            for spot in self.source.positions(date, form):
-                if not heading <= spot < limit:
-                    continue
-                later = [h for h in headings if h > spot]
-                if not later or later[0] - spot > DATE_BEFORE_HEADER:  # not the next entry's leading date
-                    return True
-        return False
+    def _date_lines(self, form: int) -> set[int]:
+        """Lines holding a date written for an entry: date-only lines in reading order; in the visual layout, lines
+        with a date-only column at or right of where entry headings start (a sidebar year does not count)."""
+        source = self.source.forms[form]
+        if not source.layout:
+            return {line for line in range(len(source.raw_lines)) if _only_dates(source.raw_lines[line])}
+        left = min(self.heading_columns[form].values(), default=0)
+        return {line for line in range(len(source.raw_lines))
+                if any(_only_dates(part) and column >= left - 1 for column, part in source.segments(line))}
 
-    def _date_owner(self, form: int, position: int) -> str | None:
-        """The entry a date written at `position` belongs to: the entry whose heading it follows, unless it directly
-        precedes the next heading of an entry that prints its dates first. In the visual-layout text a date must be
-        on its entry's own heading line(s), because a sidebar can share the lines below."""
-        if self.source.forms[form].layout:
-            line = self.source.forms[form].line_of(position)
-            return next((key for key, (first, last) in self.heading_lines[form].items() if first <= line <= last),
-                        None)
-        following = sorted((h, k) for k, h in self.headers[form].items() if h > position)
-        if following and following[0][0] - position <= DATE_BEFORE_HEADER and not self._dated_after_heading(
-                form, following[0][1]):
-            return following[0][1]
-        owner = self._owner(form, position)
-        if owner is None:
-            return None
-        heading = self.headers[form][owner]
-        return owner if position < heading + DATE_WINDOW else None
+    def _convention(self, form: int) -> str | None:
+        """How this CV places dates that are on their own line, judged from the text alone: 'after' each heading,
+        'before' it, or None when the CV shows neither or both (then a date between two headings is ambiguous)."""
+        heading_lines = {line for first, last in self.heading_lines[form].values() for line in range(first, last + 1)}
+        after = before = False
+        for line in self._date_lines(form):
+            follows, precedes = line - 1 in heading_lines, line + 1 in heading_lines
+            after = after or (follows and not precedes)
+            before = before or (precedes and not follows and line - 1 not in self._date_lines(form))
+        return 'after' if after and not before else 'before' if before and not after else None
+
+    def _date_candidates(self, form: int, position: int, needle: str) -> set[str]:
+        """The entries a date written at `position` can belong to. One entry: it belongs there. Several: the CV is
+        ambiguous and the date is left out. None: it is not written at any entry's heading."""
+        source = self.source.forms[form]
+        line = source.line_of(position)
+        if source.layout:
+            # Visual lines. On a heading's own line(s) the date must be in the heading's text or in a date-only
+            # column at or right of the heading (never a sidebar on the left). A date-only line directly above or
+            # below a heading also counts (a right-aligned date that a narrow column pushed onto its own line).
+            parts = [(column, fold(part)) for column, part in source.segments(line)]
+            if source.word_hyphens_ignored:
+                parts = [(column, _WORD_HYPHEN.sub('', part)) for column, part in parts]
+            holding = [(column, part) for column, part in parts if needle in part]
+            above, below = set(), set()
+            for key, (first, last) in self.heading_lines[form].items():
+                start = self.heading_columns[form].get(key, 0)
+                dates_here = any(_only_dates(part) and column >= start - 1 for column, part in holding)
+                if first <= line <= last:
+                    names = self.entry_names.get(key, ())
+                    if dates_here or any(any(name in part for name in names) or _heading_text_with_dates(part, names)
+                                         for _, part in holding):
+                        return {key}
+                elif line == last + 1 and dates_here:
+                    below.add(key)
+                elif line == first - 1 and dates_here:
+                    above.add(key)
+        else:
+            # Reading order: after a heading (inside its region, within DATE_WINDOW), or a date-only line directly
+            # before a heading. A run of date-only lines (dates printed apart from their entries) is never used.
+            raw = source.raw_lines
+            detached = (line > 0 and _only_dates(raw[line - 1])) or (line + 1 < len(raw) and _only_dates(raw[line + 1]))
+            if _only_dates(raw[line]) and detached:
+                return set()
+            below, above = set(), set()
+            owner = self._owner(form, position)
+            if owner is not None and position < self.headers[form][owner] + DATE_WINDOW:
+                below.add(owner)
+            following = sorted((h, k) for k, h in self.headers[form].items() if h > position)
+            if following and following[0][0] - position <= DATE_BEFORE_HEADER and _only_dates(raw[line]):
+                above.add(following[0][1])
+        if not below or not above or below == above:
+            return below | above
+        convention = self._convention(form)  # between two headings: decide only from how this CV places dates
+        return below if convention == 'after' else above if convention == 'before' else below | above
 
     def date(self, field: str, key: str, value: str, *, end: bool) -> str:
         """A date written at this entry's heading. 'Present' and similar become '' (an ongoing entry)."""
@@ -398,8 +475,21 @@ class Grounder:
         if not occurrences:
             self.warn(field, value, 'not_in_cv')
             return ''
-        if not any(self._date_owner(form, position) == key for form, position in occurrences):
-            self.warn(field, value, 'date_not_near_entry')
+        # Judged in the visual layout whenever it exists: there a date's line and column show which heading it sits
+        # beside, while reading order can merge a sidebar into a heading's line. Reading order is the fallback.
+        if any(self.source.forms[form].layout for form, _ in occurrences):
+            occurrences = [(form, position) for form, position in occurrences if self.source.forms[form].layout]
+        elif any(form.layout for form in self.source.forms):
+            occurrences = []  # the layout exists but does not contain this date
+        ambiguous = False
+        for form, position in occurrences:
+            needle = _WORD_HYPHEN.sub('', value) if self.source.forms[form].word_hyphens_ignored else value
+            candidates = self._date_candidates(form, position, needle)
+            if candidates == {key}:
+                break
+            ambiguous = ambiguous or key in candidates
+        else:
+            self.warn(field, value, 'date_ambiguous' if ambiguous else 'date_not_near_entry')
             return ''
         if end and value.casefold() in _PRESENT:
             return ''

@@ -739,3 +739,160 @@ def test_sidebar_text_sharing_a_line_with_a_job_in_the_layout_is_not_attached_to
     assert job['bullets'] == ['Built APIs'] and job['start'] == '' and job['end'] == ''
     assert set(_reasons(warnings)) == {('experience[0].bullets[1]', 'outside_entry'),
                                        ('experience[0].start', 'date_not_near_entry')}
+
+
+# --- platform-independent date layouts ---------------------------------------------------------------------------
+# These PDFs place every text run at fixed coordinates in the standard Helvetica font, so pypdf extracts exactly the
+# same text on every operating system (no system fonts or line breaking involved). They cover the ways a CV prints
+# a right-aligned date: on the heading's line, pushed one line below it (what a narrow column or a wide font does,
+# as on Linux CI), or one line above it.
+
+def placed_pdf(runs) -> bytes:
+    """A one-page PDF from (x, y, size, text) runs."""
+    def escape(text):
+        return text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)').encode('cp1252')
+    stream = b''.join(b'BT /F1 %d Tf %g %g Td (%s) Tj ET\n' % (size, x, y, escape(text)) for x, y, size, text in runs)
+    objects = [
+        b'<< /Type /Catalog /Pages 2 0 R >>',
+        b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        (b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 '
+         b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> >> >> >>'),
+        b'<< /Length %d >>\nstream\n' % len(stream) + stream + b'\nendstream',
+    ]
+    body, offsets = b'%PDF-1.7\n', []
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(body))
+        body += b'%d 0 obj\n' % number + obj + b'\nendobj\n'
+    xref = len(body)
+    body += b'xref\n0 5\n0000000000 65535 f \n' + b''.join(b'%010d 00000 n \n' % o for o in offsets)
+    return body + b'trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % xref
+
+
+LINE = 14
+
+
+def _placed_cv(date_offset: int, sidebar=()) -> bytes:
+    """Sidebar on the left (x=40), main column at x=200, dates right-aligned at x=460, `date_offset` points from
+    each heading's baseline (0 = same line, -LINE = the line below, +LINE = the line above)."""
+    runs = [(40, 760, 16, 'Ada Example'), (40, 700, 10, 'Skills'), (40, 686, 10, 'Python'), (40, 672, 10, 'React'),
+            (40, 600, 10, 'Hobbies'), (40, 586, 10, 'Chess'), *sidebar]
+    entries = [(740, 'Software Engineer, Acme Ltd', 'Jan 2021 - Present', ['Built REST APIs with Python',
+                                                                           'Cut response times by 40%']),
+               (680, 'Junior Developer, Beta Systems', 'Mar 2019 - Dec 2020', ['Maintained dashboards in React']),
+               (620, 'BSc Computer Science, Tech University', '2015 - 2019', [])]
+    for y, heading, dates, bullets in entries:
+        runs.append((200, y, 11, heading))
+        runs.append((460, y + date_offset, 10, dates))
+        runs += [(210, y - LINE * (i + 1) - (LINE if date_offset < 0 else 0), 10, '- ' + b)
+                 for i, b in enumerate(bullets)]
+    runs.append((200, 650 if date_offset >= 0 else 646, 11, 'Education'))
+    return placed_pdf(runs)
+
+
+def _placed_answer():
+    return empty_cv(full_name='Ada Example', skills=['Python', 'React'], experience=[
+        _exp('Software Engineer', 'Acme Ltd', 'Jan 2021', 'Present',
+             ['Built REST APIs with Python', 'Cut response times by 40%']),
+        _exp('Junior Developer', 'Beta Systems', 'Mar 2019', 'Dec 2020', ['Maintained dashboards in React']),
+    ], education=[ImportedEducation(school='Tech University', degree='BSc Computer Science', start='2015',
+                                    end='2019', note='')])
+
+
+DATE_LAYOUTS = {'same line': 0, 'line below': -LINE, 'line above': LINE}
+
+
+@pytest.mark.parametrize('layout', DATE_LAYOUTS)
+def test_right_aligned_dates_are_kept_in_every_placement(layout):
+    extracted = asyncio.run(extract.extract_text(_placed_cv(DATE_LAYOUTS[layout])))
+    content, warnings, _ = ground(_placed_answer(), extracted.text, extracted.layout_text)
+    assert warnings == [], extracted.layout_text
+    assert [(e['start'], e['end']) for e in content['experience']] == [('2021-01', ''), ('2019-03', '2020-12')]
+    assert (content['education'][0]['start'], content['education'][0]['end']) == ('2015', '2019')
+    assert [len(e['bullets']) for e in content['experience']] == [2, 1]
+
+
+@pytest.mark.parametrize('layout', DATE_LAYOUTS)
+def test_right_aligned_dates_never_move_to_another_entry(layout):
+    extracted = asyncio.run(extract.extract_text(_placed_cv(DATE_LAYOUTS[layout])))
+    cv = _placed_answer()
+    cv.experience[0].start, cv.experience[0].end = 'Mar 2019', 'Dec 2020'  # Beta Systems' dates
+    cv.experience[1].start = 'Jan 2021'  # Acme's start
+    cv.education[0].start = 'Mar 2019'  # a job's date as an education date
+    content, warnings, _ = ground(cv, extracted.text, extracted.layout_text)
+    assert [(e['start'], e['end']) for e in content['experience']] == [('', ''), ('', '2020-12')]
+    assert content['education'][0]['start'] == ''
+    reasons = dict(_reasons(warnings))
+    for field in ('experience[0].start', 'experience[0].end', 'experience[1].start', 'education[0].start'):
+        assert reasons[field] in {'date_not_near_entry', 'date_ambiguous'}
+
+
+@pytest.mark.parametrize('layout', DATE_LAYOUTS)
+def test_a_sidebar_year_beside_a_job_is_not_its_date(layout):
+    offset = DATE_LAYOUTS[layout]
+    # A certificate year alone in the sidebar on the job heading's line and on the lines around it.
+    sidebar = [(40, 740 + delta, 10, year) for delta, year in ((0, '2017'), (LINE, '2016'), (-LINE, '2018'))]
+    extracted = asyncio.run(extract.extract_text(_placed_cv(offset, sidebar)))
+    for year in ('2016', '2017', '2018'):
+        cv = _placed_answer()
+        cv.experience[0].start = year
+        content, warnings, _ = ground(cv, extracted.text, extracted.layout_text)
+        assert content['experience'][0]['start'] == '', (layout, year, extracted.layout_text)
+        assert dict(_reasons(warnings))['experience[0].start'] in {'date_not_near_entry', 'date_ambiguous'}
+
+
+def test_a_date_between_two_headings_with_no_other_clue_is_ambiguous():
+    # Placed PDF: a right-aligned date on the line between two headings that have no bullets or other dates.
+    pdf_bytes = placed_pdf([(200, 740, 11, 'Engineer, Acme'), (460, 726, 10, '2019 - 2021'),
+                            (200, 712, 11, 'Developer, Beta')])
+    from pypdf import PdfReader
+
+    page = PdfReader(io.BytesIO(pdf_bytes)).pages[0]
+    texts = [('Engineer, Acme\n2019 - 2021\nDeveloper, Beta\nSkills: Python, Go, Rust, SQL', None),
+             (page.extract_text(), page.extract_text(extraction_mode='layout'))]
+    for reading, layout in texts:
+        for owner in (0, 1):
+            jobs = [_exp('Engineer', 'Acme', '', '', []), _exp('Developer', 'Beta', '', '', [])]
+            jobs[owner].start, jobs[owner].end = '2019', '2021'
+            content, warnings, _ = ground(empty_cv(experience=jobs), reading, layout)
+            assert content['experience'][owner]['start'] == '' and content['experience'][owner]['end'] == ''
+            assert dict(_reasons(warnings))[f'experience[{owner}].start'] == 'date_ambiguous', (reading, layout)
+
+
+def test_the_cv_s_own_date_placement_resolves_the_same_position():
+    # Dates after headings elsewhere in the CV: the date between two headings is the earlier entry's.
+    text = 'Engineer, Acme\n2019 - 2021\nDeveloper, Beta\n2017 - 2019\nAnalyst, Gamma\n2015 - 2017'
+    cv = empty_cv(experience=[_exp('Engineer', 'Acme', '2019', '2021', []), _exp('Developer', 'Beta', '2017', '2019', []),
+                              _exp('Analyst', 'Gamma', '2015', '2017', [])])
+    content, warnings, _ = ground(cv, text)
+    assert warnings == []
+    assert [(e['start'], e['end']) for e in content['experience']] == [('2019', '2021'), ('2017', '2019'),
+                                                                        ('2015', '2017')]
+
+
+def test_a_block_of_dates_detached_from_its_entries_is_never_guessed():
+    # Reading order of a right-aligned CV without its layout version: all dates first, then the jobs.
+    text = ('Jan 2021 - Present\nMar 2019 - Dec 2020\n2015 - 2019\nSoftware Engineer, Acme Ltd\n- Built APIs\n'
+            'Junior Developer, Beta Systems\n- Maintained dashboards\nEducation\nBSc Computer Science, Tech University')
+    for start in ('Jan 2021', '2015', 'Mar 2019'):
+        cv = empty_cv(experience=[_exp('Software Engineer', 'Acme Ltd', start, '', ['Built APIs'])])
+        content, warnings, _ = ground(cv, text)
+        assert content['experience'][0]['start'] == ''
+        assert _reasons(warnings) == [('experience[0].start', 'date_not_near_entry')]
+
+
+def test_a_date_on_the_line_where_a_long_heading_wraps_is_kept():
+    # A narrow column wraps the school name: "... University of Science and" / "Technology - 2015 - 2019".
+    runs = [(40, 740, 10, 'Certified 2014'),
+            (200, 740, 11, 'BSc Computer Science, Wroclaw University of Science and'),
+            (200, 726, 11, 'Technology - 2015 - 2019'),
+            (210, 712, 10, '- Thesis: Scheduling algorithms')]
+    extracted = asyncio.run(extract.extract_text(placed_pdf(runs)))
+    edu = ImportedEducation(school='Wroclaw University of Science and Technology', degree='BSc Computer Science',
+                            start='2015', end='2019', note='')
+    content, warnings, _ = ground(empty_cv(education=[edu]), extracted.text, extracted.layout_text)
+    assert warnings == [], extracted.layout_text
+    assert (content['education'][0]['start'], content['education'][0]['end']) == ('2015', '2019')
+    edu.start = '2014'  # the sidebar certificate's year
+    content, warnings, _ = ground(empty_cv(education=[edu]), extracted.text, extracted.layout_text)
+    assert content['education'][0]['start'] == ''
+    assert dict(_reasons(warnings))['education[0].start'] in {'date_not_near_entry', 'date_ambiguous'}

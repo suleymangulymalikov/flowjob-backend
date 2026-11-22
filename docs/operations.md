@@ -90,8 +90,12 @@ adjacent lines; other mentions of the same company elsewhere in the CV do not co
 employer stay separate. Bullet points, notes and descriptions are kept only when they are written in their own
 entry's region, which ends at the next entry or section heading (Skills, Hobbies, References and similar, in English
 and Polish); text before the first entry or in other sections is never attached to an entry. Dates must be written
-at their own entry's heading (after it, or directly before it in CVs that print dates first; in the layout version,
-on the heading's own line). A phone number is returned as the CV writes it. Only unambiguous month formats such as
+at their own entry's heading. They are judged in the layout version whenever it exists: on the heading's own lines
+(in its text or in a date-only column at or right of it), or on a date-only line directly above or below it, as when
+a right-aligned date is pushed onto its own line by a narrow column or a wide font. A sidebar year left of the
+heading never counts. A date line between two headings is assigned only when the rest of the CV shows whether dates
+come after or before headings; otherwise it is reported as ambiguous (`date_ambiguous`) and left out. Without a
+layout version, reading order is used, and a block of dates printed apart from the entries is never assigned. A phone number is returned as the CV writes it. Only unambiguous month formats such as
 `Jan 2020` or `01/2020` are converted to `2020-01`; anything else is kept as written, and `Present` marks an ongoing
 entry. Every value left out is listed in `warnings` with a reason, and empty fields are listed in `missing`.
 

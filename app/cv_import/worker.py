@@ -13,11 +13,8 @@ Errors are reported as fixed codes; parser messages are never passed on, so no P
 
 import io
 import json
-import re
 import resource
 import sys
-
-_SPACES = re.compile(r' {3,}')
 
 
 def _limit(cpu_seconds: int, memory_bytes: int) -> None:
@@ -70,7 +67,7 @@ def main() -> None:
             if total > max_chars:
                 return _fail('too_much_text')
             parts.append(text)
-        layout = _layout(reader, max_chars * 2)
+        layout = _layout(reader, max_chars * 6)
     except MemoryError:
         return _fail('too_complex')
     except Exception:  # noqa: BLE001 - a malformed PDF can raise anything; only a fixed code leaves this process
@@ -79,11 +76,12 @@ def main() -> None:
 
 
 def _layout(reader, budget: int) -> str | None:
-    """Visual-line text, with runs of padding spaces shortened. None when it fails or exceeds `budget`."""
+    """Visual-line text with its spacing kept (a column's position on the line is its horizontal position on the
+    page). None when it fails or exceeds `budget`."""
     pages, total = [], 0
     try:
         for page in reader.pages:
-            text = '\n'.join(_SPACES.sub('   ', line).rstrip()
+            text = '\n'.join(line.rstrip()
                              for line in (page.extract_text(extraction_mode='layout') or '').splitlines())
             total += len(text)
             if total > budget:
