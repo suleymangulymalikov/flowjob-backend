@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     tailor_temperature: float | None = 0.2
     ai_global_daily_quota: int = 500
 
+    # Smart CV Import (paid): organizing the text of an uploaded PDF CV. Counts toward ai_global_daily_quota.
+    import_daily_quota: int = 5
+    # A whole CV is copied into the structured output, so it needs a larger budget than matching or tailoring.
+    import_max_output_tokens: int = 8000
+    import_timeout_seconds: float = 90.0
+
     # --- Gmail integration (optional). Without the Google client and token key, Gmail reports itself unavailable
     # and every other feature works unchanged. ---
     google_oauth_client_id: str | None = None

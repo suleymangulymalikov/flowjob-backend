@@ -51,6 +51,45 @@ cannot fetch external resources. Saved CVs, unsaved previews and legacy PDF
 downloads share two active render slots per backend worker. Additional PDF
 requests receive 503 and a short Retry-After header.
 
+## Smart CV Import
+
+`POST /api/v1/cvs/import` organizes an uploaded PDF CV into the CV Builder's structure for the user to review. It
+stores nothing: the PDF, its text and the result exist only during the request. The reviewed CV is saved later,
+only through `POST /api/v1/cvs`.
+
+**Request.** The body is the PDF itself with `Content-Type: application/pdf`. The request must carry the header
+`X-FlowJob-AI-Consent: cv-import`, which the app sends only after the user agrees that the CV text is sent to
+OpenAI to organize it; without it the API answers 428. The user must be signed in.
+
+**File limits.** At most 5 MB (413, checked before the body is read), 10 pages and 30,000 characters of text. The
+file must start with the PDF header; its declared name or type is not trusted. Password-protected, unreadable,
+too complex and scanned (no selectable text) PDFs return 422 with a message that says which. Scanned PDFs are not
+supported yet; OCR can be added later as another extraction method without changing the endpoint.
+
+**Isolated parsing.** pypdf runs in a separate Python process (`app/cv_import/worker.py`) started with `-I`, a
+minimal environment without credentials, a 10-second CPU limit, a 768 MB memory limit (enforced on Linux), no
+permission to write files, and a 15-second wall-clock timeout after which it is killed. At most two PDFs are parsed
+at a time per backend process; more return 503.
+
+**AI call and quota.** After the text is extracted, one `import` quota unit is reserved (`IMPORT_DAILY_QUOTA`,
+default 5 per user per UTC day, also counted toward `AI_GLOBAL_DAILY_QUOTA`), and one gpt-4.1 call sorts the text
+into fields (`IMPORT_MAX_OUTPUT_TOKENS` 8000, `IMPORT_TIMEOUT_SECONDS` 90). A failed call refunds the unit; a file
+rejected before the call never uses one. Typical cost is about $0.02–0.04 per import at the default prices.
+
+**Checks against the PDF text.** The model is told to copy values exactly, and the backend keeps only values it
+finds in the extracted text: names, contact details, job titles, employers, schools, degrees, dates, bullet points,
+projects, skills and languages. Matching tolerates differences that come from PDF extraction (line breaks,
+whitespace, ligatures, curly quotes, dash styles, bullet symbols, words hyphenated across a line break) but not
+changed wording, numbers or capitalization, and words must match whole. Dates must be written next to their own
+entry and bullet points under their own entry, so nothing moves between jobs. A phone number is returned as the CV
+writes it. Only unambiguous month formats such as `Jan 2020` or `01/2020` are converted to `2020-01`; anything else
+is kept as written, and `Present` marks an ongoing entry. Every value left out is listed in `warnings` with a
+reason, and empty fields are listed in `missing`.
+
+**Response.** `{content, warnings, missing, source: {pages, method}, model}`, where `content` has the same shape as
+`CvContent` and can be sent to `POST /api/v1/cvs` after review. The response is marked `Cache-Control: no-store`.
+Logs contain only fixed error codes, never CV text.
+
 ## Authentication and deployment
 
 Browser and legacy authentication share MongoDB fixed windows of 15 minutes.

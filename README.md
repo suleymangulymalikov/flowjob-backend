@@ -15,6 +15,9 @@ This repository contains the **REST API**, built with FastAPI and MongoDB. The w
   WeasyPrint for preview and download.
 - **Job Matching**: OpenAI extracts the job's requirements and quotes evidence from the CV; the backend verifies
   every quotation and calculates the score itself. Results are cached and limited per user and per day.
+- **Smart CV Import**: turns the selectable text of an uploaded PDF CV into the CV Builder's structure for the
+  user to review. Every value is checked against the PDF's own text; nothing is stored until the user saves the
+  CV.
 - **CV Tailoring**: proposes typed, verified changes (reorders, rewrites, new skills) for a specific job. Only
   changes the user approves are applied, and the result is saved as a new CV; the original is never modified.
 - **Applications**: track applications with status, history, follow-up dates, notes and the CV that was sent.
@@ -31,7 +34,7 @@ This repository contains the **REST API**, built with FastAPI and MongoDB. The w
 | Authentication | PyJWT, pwdlib (Argon2) |
 | AI | [OpenAI](https://platform.openai.com/) Responses API with structured outputs (default model `gpt-4.1`) |
 | Email | Gmail API and Google OAuth 2.0 (read-only scope), AES-256-GCM token encryption (`cryptography`) |
-| PDF | [WeasyPrint](https://weasyprint.org/) with a Jinja2 template |
+| PDF | [WeasyPrint](https://weasyprint.org/) with a Jinja2 template; [pypdf](https://pypdf.readthedocs.io/) for reading uploaded CVs |
 | Tests and CI | pytest with a private MongoDB per run, GitHub Actions |
 
 ## Project structure
@@ -45,6 +48,7 @@ app/
   users/, profiles/  account and profile
   integration/       browser API: profile, saved CVs, CV PDFs, account settings
   cv/                CV validation and Harvard PDF rendering (templates/harvard.html)
+  cv_import/         Smart CV Import: isolated PDF text extraction, checks against the PDF text, endpoint
   matches/           Job Matching API
   ai_matching/       requirement extraction, citation checks and scoring
   tailor/            CV Tailoring API and verification of suggested changes
@@ -106,7 +110,7 @@ every variable with comments. Never commit `.env`; it is ignored by Git.
 | `COOKIE_SECURE` | no | `false` for local HTTP, `true` in production (HTTPS) |
 | `OPENAI_API_KEY` | no | Enables the AI features. Leave empty to disable them (the AI endpoints return 503) |
 | `OPENAI_MODEL` | no | Model for all AI features, default `gpt-4.1` |
-| `MATCH_DAILY_QUOTA`, `TAILOR_DAILY_QUOTA`, `AI_GLOBAL_DAILY_QUOTA` | no | Daily AI limits per user and in total |
+| `MATCH_DAILY_QUOTA`, `TAILOR_DAILY_QUOTA`, `IMPORT_DAILY_QUOTA`, `AI_GLOBAL_DAILY_QUOTA` | no | Daily AI limits per user (CV import: 5) and in total |
 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GMAIL_TOKEN_KEY` | no | Enable the Gmail integration |
 | `GOOGLE_OAUTH_REDIRECT_URI`, `FRONTEND_BASE_URL` | no | Gmail OAuth redirect and the frontend address |
 | `GMAIL_SCHEDULER_ENABLED` | no | Background Gmail sync every 3 hours, default `false` |
@@ -149,6 +153,7 @@ still available. Full request and response schemas are in the interactive docume
 | Account | `PATCH /api/v1/me`, `POST /api/v1/me/password` |
 | Profile | `GET`, `PUT /api/v1/profile` |
 | CVs | `/api/v1/cvs` (list, create, read, update, delete), `GET /api/v1/cvs/{id}/pdf`, `POST /api/v1/cvs/preview/pdf` |
+| Smart CV Import | `POST /api/v1/cvs/import` (see [docs/operations.md](docs/operations.md#smart-cv-import)) |
 | Job Matching | `POST`, `GET /api/v1/matches`, `GET`, `DELETE /api/v1/matches/{id}` |
 | CV Tailoring | `POST /api/v1/tailor`, `GET /api/v1/tailor/{id}`, `GET /api/v1/tailor/capabilities` |
 | Applications | `/api/v1/applications` (list, create, read, update, delete) |
@@ -226,8 +231,8 @@ on that host to the backend with a reverse proxy, as the Vite proxy does in deve
 
 ## Further documentation
 
-- [docs/operations.md](docs/operations.md): AI usage limits, CV and PDF limits, and authentication settings for
-  deployment
+- [docs/operations.md](docs/operations.md): AI usage limits, CV and PDF limits, Smart CV Import, and
+  authentication settings for deployment
 - [docs/gmail.md](docs/gmail.md): Gmail integration details, scheduler, key management, privacy and data retention
 - [scripts/tailor_eval/README.md](scripts/tailor_eval/README.md): the tailoring evaluation script. It calls OpenAI
   for real when a real key is configured, which costs money, and creates throwaway accounts in the configured
