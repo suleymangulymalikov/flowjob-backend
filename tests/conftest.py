@@ -35,6 +35,8 @@ def pytest_sessionstart(session):
         env.setenv("JWT_SECRET", token_hex(32))
         # Gmail stays unconfigured and the scheduler off unless a test opts in explicitly.
         env.setenv("GMAIL_SCHEDULER_ENABLED", "false")
+        # Tests never call the real job-board APIs.
+        env.setenv("JOBS_LIVE_FETCH", "false")
 
         # Settings loads .env relative to the working directory at import time.
         # Load it from the empty test directory, then restore the project cwd.
