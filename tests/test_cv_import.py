@@ -1098,3 +1098,19 @@ def test_a_bullet_ending_with_the_next_role_s_title_is_not_its_heading():
         content, warnings, _ = ground(answer, extracted.text, layout)
         assert content['experience'][1]['bullets'][0] == 'Promoted to Annotation Specialist'
         assert not [w for w in warnings if w['field'].startswith('experience[1]')]
+
+
+def test_the_worker_output_does_not_depend_on_the_console_encoding(tmp_path):
+    # Windows consoles default to cp1252: the worker must still return Polish letters, bullets and dashes.
+    worker = tmp_path / 'worker.py'
+    worker.write_text(extract._WORKER.read_text())
+    code = ('import io, sys; sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="cp1252"); '
+            'sys.argv = ["worker.py", "10", "30000", "10", "800000000"]; '
+            f'exec(compile(open({str(worker)!r}).read(), "worker.py", "exec"))')
+    payload = {'ok': True, 'pages': 1, 'text': 'Łukasz Żółw • Kraków – 2024'}
+    # Feed the real worker's _emit through the cp1252 console: call it directly with non-ASCII text.
+    code_emit = code.replace('exec(compile(', 'ns = {"__name__": "w"}; exec(compile(').replace('"exec"))', '"exec"), ns); '
+                             f'ns["_emit"]({payload!r})')
+    result = extract.subprocess.run([sys.executable, '-c', code_emit], capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr.decode()[-500:]
+    assert extract.json.loads(result.stdout) == payload

@@ -37,8 +37,10 @@ def _limit(cpu_seconds: int, memory_bytes: int) -> None:
 
 
 def _emit(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
-    sys.stdout.flush()
+    # Raw UTF-8 bytes, never the console encoding: on Windows that is cp1252, which cannot write characters such as
+    # Polish letters or bullets (and -I ignores PYTHONIOENCODING), so the import would fail for most real CVs.
+    sys.stdout.buffer.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+    sys.stdout.buffer.flush()
 
 
 def _fail(code: str) -> None:
