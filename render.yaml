@@ -1,0 +1,30 @@
+# Render Blueprint for the FlowJob backend. In Render: New > Blueprint > pick this repository.
+# Deploys main automatically, but only after the GitHub checks (the test suite) pass.
+services:
+  - type: web
+    name: flowjob-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      # Asked for once when the Blueprint is created. Never commit these values.
+      - key: MONGODB_URI
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: FRONTEND_BASE_URL # e.g. https://flowjob.vercel.app
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGODB_DB_NAME
+        value: flowjob
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: OPENAI_MODEL
+        value: gpt-4.1
+      - key: JOBS_LIVE_FETCH
+        value: "true"
