@@ -13,11 +13,17 @@ Errors are reported as fixed codes; parser messages are never passed on, so no P
 
 import io
 import json
-import resource
 import sys
+
+try:
+    import resource
+except ImportError:  # Windows has no resource limits; the wall-clock timeout, page and text limits still apply
+    resource = None
 
 
 def _limit(cpu_seconds: int, memory_bytes: int) -> None:
+    if resource is None:
+        return
     limits = (
         (resource.RLIMIT_CPU, cpu_seconds),
         (resource.RLIMIT_FSIZE, 0),  # no files may be written

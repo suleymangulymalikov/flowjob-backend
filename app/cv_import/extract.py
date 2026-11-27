@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,26 +71,29 @@ class ExtractedText:
 
 def _worker_env() -> dict[str, str]:
     # Only what Python needs to start: no FlowJob settings, database URI or API keys reach the parser process.
-    return {key: os.environ[key] for key in ('PATH', 'SYSTEMROOT', 'TMPDIR') if key in os.environ} | {
+    keep = ('PATH', 'SYSTEMROOT', 'TMPDIR', 'TEMP', 'TMP')  # SYSTEMROOT, TEMP and TMP are what Windows needs
+    return {key: os.environ[key] for key in keep if key in os.environ} | {
         'LANG': 'C.UTF-8', 'PYTHONIOENCODING': 'utf-8'}
 
 
 async def _run_worker(data: bytes) -> dict:
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, '-I', str(_WORKER),
-        str(MAX_PAGES), str(MAX_TEXT_CHARS), str(WORKER_CPU_SECONDS), str(WORKER_MEMORY_BYTES),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    # A plain subprocess driven from a thread, not asyncio's subprocess API: that one fails on Windows under
+    # `uvicorn --reload` (selector event loop), while this works on every OS and event loop.
+    process = subprocess.Popen(
+        [sys.executable, '-I', str(_WORKER),
+         str(MAX_PAGES), str(MAX_TEXT_CHARS), str(WORKER_CPU_SECONDS), str(WORKER_MEMORY_BYTES)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env=_worker_env(), cwd=_WORKER.parent,
     )
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(data), timeout=WORKER_TIMEOUT_SECONDS)
-    except TimeoutError:
+        stdout, _ = await asyncio.to_thread(process.communicate, data, WORKER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
         raise ImportFileError('too_complex') from None
     finally:
         # Also covers a cancelled request: the parser never outlives it.
-        if process.returncode is None:
+        if process.poll() is None:
             process.kill()
-            await process.wait()
+            await asyncio.to_thread(process.wait)
     if process.returncode != 0 or not stdout or len(stdout) > _MAX_WORKER_OUTPUT:
         # Killed by the CPU or memory limit, or crashed.
         raise ImportFileError('too_complex' if process.returncode and process.returncode < 0 else 'unreadable')

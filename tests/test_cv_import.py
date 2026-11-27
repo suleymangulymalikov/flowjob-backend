@@ -482,15 +482,30 @@ def test_the_quota_workflow_is_separate_but_counts_globally(client, monkeypatch)
 
 def test_extraction_runs_in_a_separate_process(monkeypatch):
     seen = {}
-    real = asyncio.create_subprocess_exec
+    real = extract.subprocess.Popen
 
-    async def spy(*args, **kwargs):
+    def spy(args, **kwargs):
         seen['args'], seen['env'] = args, kwargs.get('env')
-        return await real(*args, **kwargs)
-    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spy)
+        return real(args, **kwargs)
+    monkeypatch.setattr(extract.subprocess, 'Popen', spy)
     asyncio.run(extract.extract_text(pdf()))
-    assert seen['args'][:3] == (sys.executable, '-I', str(extract._WORKER))
-    assert set(seen['env']) <= {'PATH', 'SYSTEMROOT', 'TMPDIR', 'LANG', 'PYTHONIOENCODING'}
+    assert seen['args'][:3] == [sys.executable, '-I', str(extract._WORKER)]
+    assert set(seen['env']) <= {'PATH', 'SYSTEMROOT', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'PYTHONIOENCODING'}
+
+
+def test_the_worker_runs_without_the_resource_module(tmp_path):
+    # Windows has no `resource` module: the worker must still extract text there.
+    blocker = tmp_path / 'resource.py'
+    blocker.write_text('raise ImportError("no resource module on this OS")\n')
+    worker = tmp_path / 'worker.py'
+    worker.write_text(extract._WORKER.read_text())
+    env = {**extract._worker_env(), 'PYTHONPATH': str(tmp_path)}
+    # -I would ignore PYTHONPATH, so run with -S -E off: put the blocker first on sys.path instead.
+    code = (f'import sys; sys.path.insert(0, {str(tmp_path)!r}); sys.argv = ["worker.py", "10", "30000", "10", "1"]; '
+            f'exec(compile(open({str(worker)!r}).read(), "worker.py", "exec"))')
+    result = extract.subprocess.run([sys.executable, '-c', code], input=pdf(), capture_output=True, env=env, timeout=30)
+    assert result.returncode == 0, result.stderr.decode()[-500:]
+    assert extract.json.loads(result.stdout)['ok'] is True
 
 
 # --- regressions from the PR #11 review ------------------------------------------------------------------------
