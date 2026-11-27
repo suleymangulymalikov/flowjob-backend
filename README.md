@@ -231,6 +231,8 @@ on that host to the backend with a reverse proxy, as the Vite proxy does in deve
 
 ## Further documentation
 
+- [docs/deployment.md](docs/deployment.md): hosting on Vercel, Render and MongoDB Atlas, and how updates go live
+
 - [docs/operations.md](docs/operations.md): AI usage limits, CV and PDF limits, Smart CV Import, and
   authentication settings for deployment
 - [docs/gmail.md](docs/gmail.md): Gmail integration details, scheduler, key management, privacy and data retention

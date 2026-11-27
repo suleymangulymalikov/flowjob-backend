@@ -14,6 +14,7 @@ from app.cv_import.router import router as cv_import_router
 from app.integration.router import router as ui_router
 from app.db import client, init_db
 from app.gmail.router import router as gmail_router
+from app.jobs.router import router as jobs_router
 from app.profiles.router import router as profiles_router
 from app.users.router import router as users_router
 
@@ -55,6 +56,7 @@ app.include_router(cv_router)
 app.include_router(cv_import_router)
 app.include_router(cv_import_profile_router)
 app.include_router(gmail_router)
+app.include_router(jobs_router)
 
 
 @app.get("/health")

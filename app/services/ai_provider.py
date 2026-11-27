@@ -171,6 +171,11 @@ def _log_failure(error: Exception) -> None:
         'type': _safe_token(getattr(error, 'type', None)),
         'request_id': _safe_token(getattr(error, 'request_id', None)),
     }
+    if isinstance(error, ValidationError):
+        # Which fields broke which rule (e.g. "changes.3.reason:string_too_long"), never the model's text.
+        fields['fields'] = ','.join(sorted({
+            '.'.join(str(part) for part in e.get('loc', ())) + ':' + str(e.get('type', '')) for e in error.errors()
+        }))[:300] or None
     details = ' '.join(f'{key}={value}' for key, value in fields.items() if value is not None)
     logger.warning('AI request failed (model %s): %s%s', _safe_token(settings.openai_model) or 'unknown',
                    type(error).__name__, f' ({details})' if details else '')

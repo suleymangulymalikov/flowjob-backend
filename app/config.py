@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     openai_input_price_per_1m: float = 2.00
     openai_output_price_per_1m: float = 8.00
 
+    # Job listings (public job-board APIs, no key, no cost). Set JOBS_LIVE_FETCH=false to never call them.
+    jobs_live_fetch: bool = True
+    jobs_refresh_hours: float = 6.0
+
     # Cost/abuse controls
     match_daily_quota: int = 20  # analyses per user per UTC day
     match_job_description_min_chars: int = 80
