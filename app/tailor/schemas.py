@@ -6,16 +6,21 @@
 target, fills in the original text, checks reorders are exact permutations and skill additions are backed by a
 verbatim CV quotation, and decides which changes may be previewed automatically (verified reorders only).
 """
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
+
+from app.services.ai_lenient import LenientModel
 
 TAILORING_PROMPT_VERSION = 'ai-first-3'
 TAILORING_VERSION = '2'
 MAX_CHANGES = 12
 
 
-class ProposedChange(BaseModel):
+class ProposedChange(LenientModel):
+    # A rewrite cut off mid-sentence must never reach a CV: an over-long one is emptied and then rejected alone.
+    _blank_if_too_long: ClassVar[frozenset[str]] = frozenset({'suggested', 'path', 'evidence_path'})
+
     op: Literal['rewrite', 'reorder', 'delete', 'add_skill']
     # rewrite: summary | experience.<id>.bullets.<n> | projects.<id>.description
     # reorder: "skills" or "experience.<id>" (that role's bullets)   delete: experience.<id>.bullets.<n> or "skills"
@@ -30,7 +35,7 @@ class ProposedChange(BaseModel):
     evidence_quote: str | None = Field(default=None, max_length=240)  # add_skill: verbatim quote from that item
 
 
-class TailoringAnalysis(BaseModel):
+class TailoringAnalysis(LenientModel):
     # An empty list is a valid, successful answer: nothing worth changing.
     changes: list[ProposedChange] = Field(default_factory=list, max_length=MAX_CHANGES)
     # Requirements the job needs but the CV does not support — surfaced, never added.

@@ -39,6 +39,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.services.ai_lenient import LenientModel
+
 MATCH_PROMPT_VERSION = 'exp-2'
 
 SYSTEM_PROMPT = (
@@ -113,12 +115,12 @@ SYSTEM_PROMPT = (
 
 # --- the structured contract -----------------------------------------------------------------------
 
-class Citation(BaseModel):
+class Citation(LenientModel):
     path: str = Field(max_length=80)  # e.g. "summary", "skills", "experience.exp-1.bullets.0", "projects.proj-1.description"
     quote: str = Field(max_length=240)
 
 
-class Requirement(BaseModel):
+class Requirement(LenientModel):
     id: str = Field(max_length=16)
     requirement: str = Field(max_length=160)
     category: Literal['required', 'standard', 'preferred']
@@ -129,12 +131,12 @@ class Requirement(BaseModel):
     explanation: str = Field(max_length=240)
 
 
-class ExcludedItem(BaseModel):
+class ExcludedItem(LenientModel):
     text: str = Field(max_length=160)
     reason: Literal['working_condition', 'personality_trait', 'job_duty', 'other']
 
 
-class MatchAnalysis(BaseModel):
+class MatchAnalysis(LenientModel):
     enough_info: bool
     requirements: list[Requirement] = Field(default_factory=list, max_length=25)
     excluded: list[ExcludedItem] = Field(default_factory=list, max_length=10)
