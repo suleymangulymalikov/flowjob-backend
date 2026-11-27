@@ -67,7 +67,7 @@ def test_fit_score_label_and_missing_skills():
     assert cv == {'skills': {'Python', 'SQL', 'Docker'}, 'languages': {'English'}}
     job_s = {'required': ['Docker', 'Python', 'SQL', 'AWS'], 'optional': ['Kubernetes', 'Terraform'], 'languages': ['English']}
     f = fit(job_s, cv)
-    assert f['score'] == 60 and f['label'] == 'Strong fit'  # 3 of (4 required + 2 optional at half weight)
+    assert f['score'] == 60 and f['label'] == 'High skill overlap'  # 3 of (4 required + 2 optional at half weight)
     assert f['missing'] == ['AWS'] and f['missingOptional'] == ['Kubernetes', 'Terraform']
     # A required spoken language the CV does not have caps the score.
     capped = fit({**job_s, 'languages': ['German']}, cv)
@@ -165,7 +165,7 @@ def test_list_with_cv_adds_fit_and_sorts_best_first(client):
     assert [j['title'] for j in body['items']] == [
         'Junior Python Developer', 'Data Intern', 'Junior Frontend Developer', 'Junior Analyst']
     first = body['items'][0]['fit']
-    assert first['score'] == 100 and first['label'] == 'Strong fit' and first['matched'] == ['Docker', 'Python', 'SQL']
+    assert first['score'] == 100 and first['label'] == 'High skill overlap' and first['matched'] == ['Docker', 'Python', 'SQL']
     assert body['items'][1]['fit']['missing'] == ['Excel', 'Tableau']
     assert body['items'][3]['fit'] == {'score': None, 'label': 'Not enough detail', 'matched': [], 'missing': [],
                                        'missingOptional': [], 'missingLanguages': []}
@@ -184,3 +184,27 @@ def test_fit_needs_your_own_cv(client):
     assert client.get(f'{BASE}/jobs', headers=bob, params={'cvId': ana_cv}).status_code == 404
     assert client.get(f'{BASE}/jobs', headers=bob, params={'cvId': 'nope'}).status_code == 404
     assert client.get(f'{BASE}/jobs', headers=bob, params={'sort': 'fit'}).status_code == 422
+
+
+def test_skills_joined_by_or_are_alternatives():
+    from app.jobs.skills import job_skills
+    skills = job_skills('Backend Developer', 'Requirements:\n- Python and FastAPI or Django\n- SQL\n- HTML/CSS')
+    assert skills['alternatives'] == [['Django', 'FastAPI']]
+    cv = {'skills': {'Python', 'FastAPI', 'SQL', 'HTML', 'CSS'}, 'languages': set()}
+    f = fit(skills, cv)
+    assert f['missing'] == [] and f['score'] == 100  # FastAPI covers "FastAPI or Django"; HTML/CSS stays two skills
+    f = fit(skills, {'skills': {'Python', 'SQL'}, 'languages': set()})
+    assert f['missing'] == ['CSS', 'Django or FastAPI', 'HTML'] and f['score'] == 40
+
+
+def test_polish_lub_and_comma_or_are_alternatives():
+    from app.jobs.skills import job_skills
+    skills = job_skills('Developer', 'Wymagania:\n- Java lub Kotlin\n- Docker, Kubernetes, or Terraform')
+    assert ['Java', 'Kotlin'] in skills['alternatives']
+    assert any({'Kubernetes', 'Terraform'} <= set(g) for g in skills['alternatives'])
+
+
+def test_postings_stored_before_alternatives_still_score():
+    f = fit({'required': ['Python', 'SQL', 'Docker'], 'optional': [], 'languages': []},
+            {'skills': {'Python'}, 'languages': set()})
+    assert f['score'] == 33 and f['label'] == 'Low skill overlap'

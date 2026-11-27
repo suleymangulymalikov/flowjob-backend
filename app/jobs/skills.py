@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 # Bump when the dictionary or rules change, so stored job skills are recalculated.
-SKILLS_VERSION = 3
+SKILLS_VERSION = 4  # 4: skills joined by "or" are stored as alternatives
 
 # (display name, regex). Matching is case-insensitive unless the name is in CASE_SENSITIVE.
 _SKILLS: list[tuple[str, str]] = [
@@ -136,6 +136,34 @@ def find_skills(text: str) -> set[str]:
     return found
 
 
+# Two skills joined only by "or" are alternatives: "FastAPI or Django" asks for one of them.
+# "/" is not treated as "or", because "HTML/CSS" usually means both.
+_OR = re.compile(r'\s*,?\s*(?:or|lub|albo)\s+', re.I)
+
+
+def _alternatives(text: str) -> list[list[str]]:
+    """Groups of skills joined by "or" on the same line, e.g. [['Django', 'FastAPI']]."""
+    groups: list[list[str]] = []
+    for line in (text or '').splitlines():
+        hits = sorted((m.start(), m.end(), names[m.lastgroup])
+                      for pattern, names in (_SENSITIVE, _INSENSITIVE) for m in pattern.finditer(line))
+        run: list[str] = []
+        prev_end = None
+        for start, end, name in hits:
+            if prev_end is not None and start < prev_end:
+                continue  # overlapping match of the same words
+            if run and _OR.fullmatch(line[prev_end:start]):
+                run.append(name)
+            else:
+                if len(set(run)) > 1:
+                    groups.append(sorted(set(run)))
+                run = [name]
+            prev_end = end
+        if len(set(run)) > 1:
+            groups.append(sorted(set(run)))
+    return groups
+
+
 def _header(line: str) -> str | None:
     stripped = line.strip(' -*:#\t•')
     if not stripped or len(stripped) >= 60:
@@ -187,9 +215,11 @@ def job_skills(title: str, description: str | None) -> dict[str, Any] | None:
     required_text, optional_text = _split_sections(description)
     required = find_skills(f'{title}\n{required_text}')
     optional = find_skills(optional_text) - required
+    alternatives = {tuple(g) for g in _alternatives(required_text) + _alternatives(optional_text)}
     return {
         'required': sorted(required),
         'optional': sorted(optional),
+        'alternatives': sorted(list(g) for g in alternatives),
         'languages': sorted(_required_languages(required_text)),
         'version': SKILLS_VERSION,
     }
@@ -225,18 +255,31 @@ def fit(job: dict[str, Any] | None, cv: dict[str, set[str]]) -> dict[str, Any]:
     required, optional = set(job['required']), set(job['optional'])
     have = cv['skills']
     missing_languages = sorted(set(job['languages']) - cv['languages'])
+    # Each requirement is one unit: a single skill, or a group of alternatives ("FastAPI or Django")
+    # that is met by any one of its skills. A group counts as required if any of its skills is.
+    units: list[tuple[set[str], bool]] = []
+    grouped: set[str] = set()
+    for group in job.get('alternatives') or []:
+        members = set(group) & (required | optional)
+        if len(members) > 1 and not members & grouped:
+            units.append((members, bool(members & required)))
+            grouped |= members
+    units += [({s}, True) for s in required - grouped] + [({s}, False) for s in optional - grouped]
+    name = lambda members: ' or '.join(sorted(members))  # noqa: E731
     result = {
         'matched': sorted((required | optional) & have),
-        'missing': sorted(required - have),
-        'missingOptional': sorted(optional - have),
+        'missing': sorted(name(m) for m, req in units if req and not m & have),
+        'missingOptional': sorted(name(m) for m, req in units if not req and not m & have),
         'missingLanguages': missing_languages,
     }
     if len(required) + len(optional) < MIN_SKILLS:
         return {'score': None, 'label': 'Not enough detail', **result}
-    total = len(required) + 0.5 * len(optional)
-    earned = len(required & have) + 0.5 * len(optional & have)
+    total = sum(1 if req else 0.5 for _, req in units)
+    earned = sum(1 if req else 0.5 for m, req in units if m & have)
     score = round(100 * earned / total)
     if missing_languages:  # a required language you do not speak is a real blocker
         score = min(score, 30)
-    label = 'Strong fit' if score >= 60 else 'Good fit' if score >= 35 else 'Partial fit' if score > 0 else 'Low fit'
+    # Own wording on purpose: this keyword check must not look like the AI match verdict (Strong fit at 80+).
+    label = ('High skill overlap' if score >= 60 else 'Some skill overlap' if score >= 35
+             else 'Low skill overlap' if score > 0 else 'No skill overlap')
     return {'score': score, 'label': label, **result}
